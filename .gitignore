@@ -3,3 +3,6 @@ __pycache__/
 .env
 *.tar.gz
 .DS_Store
+Vagrantfile
+.vagrant/
+*.log
