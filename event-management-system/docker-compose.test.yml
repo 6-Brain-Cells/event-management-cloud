@@ -61,7 +61,7 @@ services:
       sh -c "
         pip install -q requests pytest &&
         sleep 10 &&
-        python -m pytest test_api.py -v --tb=short
+        python -m pytest -v --tb=short
       "
     environment:
       BASE_URL: http://nginx
