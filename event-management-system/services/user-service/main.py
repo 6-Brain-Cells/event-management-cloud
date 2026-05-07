@@ -94,6 +94,15 @@ def register(user: UserCreate):
     conn = get_db()
     cur = conn.cursor()
     try:
+        # Avoid inserting when username/email already exists.
+        # This prevents SERIAL sequence from being consumed on failed INSERTs.
+        cur.execute(
+            "SELECT id FROM users WHERE username=%s OR email=%s LIMIT 1",
+            (user.username, user.email),
+        )
+        if cur.fetchone():
+            raise HTTPException(status_code=400, detail="Username or email already exists")
+
         cur.execute(
             "INSERT INTO users (username, email, password_hash, full_name) VALUES (%s, %s, %s, %s) RETURNING id, username, email, full_name, created_at",
             (user.username, user.email, hash_password(user.password), user.full_name)
