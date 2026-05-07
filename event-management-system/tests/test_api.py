@@ -127,7 +127,6 @@ class TestRegistrationService:
         assert r.status_code == 200
         data = r.json()
         assert "ticket_number" in data["registration"]
-        return data["registration"]
 
     def test_duplicate_registration_fails(self, test_user, test_event):
         r = requests.post(url("/registrations"), json={

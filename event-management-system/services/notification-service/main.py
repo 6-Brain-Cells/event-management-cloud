@@ -134,6 +134,10 @@ def startup():
 def health():
     return {"status": "healthy", "service": "notification-service"}
 
+@app.get("/notifications/health")
+def notifications_health():
+    return {"status": "healthy", "service": "notification-service"}
+
 @app.post("/notifications")
 def create_notification(notif: NotificationCreate):
     """Manually create a notification (e.g., reminders triggered by organizers)"""

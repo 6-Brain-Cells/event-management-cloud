@@ -82,6 +82,10 @@ def generate_ticket_number(reg_id: int) -> str:
 def health():
     return {"status": "healthy", "service": "registration-service"}
 
+@app.get("/registrations/health")
+def registrations_health():
+    return {"status": "healthy", "service": "registration-service"}
+
 @app.post("/registrations")
 def register(reg: RegistrationCreate):
     # Check with event service that capacity exists

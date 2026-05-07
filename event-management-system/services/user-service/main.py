@@ -83,6 +83,10 @@ def startup():
 def health():
     return {"status": "healthy", "service": "user-service"}
 
+@app.get("/users/health")
+def users_health():
+    return {"status": "healthy", "service": "user-service"}
+
 @app.post("/users/register")
 def register(user: UserCreate):
     conn = get_db()

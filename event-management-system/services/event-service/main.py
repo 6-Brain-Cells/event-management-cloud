@@ -85,6 +85,10 @@ def startup():
 def health():
     return {"status": "healthy", "service": "event-service"}
 
+@app.get("/events/health")
+def events_health():
+    return {"status": "healthy", "service": "event-service"}
+
 @app.post("/events")
 def create_event(event: EventCreate):
     conn = get_db()
