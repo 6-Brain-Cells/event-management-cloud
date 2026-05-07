@@ -209,6 +209,27 @@ def increment_registration(event_id: int):
         cur.close()
         conn.close()
 
+@app.patch("/events/{event_id}/decrement-registration")
+def decrement_registration(event_id: int):
+    """Compensating action used when registration creation fails after increment."""
+    conn = get_db()
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            UPDATE events
+            SET registered_count = GREATEST(registered_count - 1, 0)
+            WHERE id=%s
+            RETURNING id, registered_count, max_capacity
+        """, (event_id,))
+        row = cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Event not found")
+        conn.commit()
+        return dict(row)
+    finally:
+        cur.close()
+        conn.close()
+
 @app.delete("/events/{event_id}")
 def cancel_event(event_id: int):
     conn = get_db()

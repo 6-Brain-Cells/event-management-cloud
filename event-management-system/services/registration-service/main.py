@@ -150,19 +150,29 @@ def register(reg: RegistrationCreate):
             },
         )
 
-    # Check with event service that capacity exists
-    try:
-        resp = httpx.patch(f"{EVENT_SERVICE_URL}/events/{reg.event_id}/increment-registration")
-        if resp.status_code == 409:
-            raise HTTPException(status_code=409, detail="Event is full")
-        elif resp.status_code != 200:
-            raise HTTPException(status_code=400, detail="Could not verify event capacity")
-    except httpx.ConnectError:
-        raise HTTPException(status_code=503, detail="Event service unavailable")
-
     conn = get_db()
     cur = conn.cursor()
+    increment_done = False
     try:
+        # Fast duplicate guard to avoid consuming capacity for already-registered users.
+        cur.execute(
+            "SELECT id FROM registrations WHERE user_id=%s AND event_id=%s",
+            (reg.user_id, reg.event_id),
+        )
+        if cur.fetchone():
+            raise HTTPException(status_code=409, detail="User already registered for this event")
+
+        # Check with event service that capacity exists.
+        try:
+            resp = httpx.patch(f"{EVENT_SERVICE_URL}/events/{reg.event_id}/increment-registration")
+            if resp.status_code == 409:
+                raise HTTPException(status_code=409, detail="Event is full")
+            elif resp.status_code != 200:
+                raise HTTPException(status_code=400, detail="Could not verify event capacity")
+            increment_done = True
+        except httpx.ConnectError:
+            raise HTTPException(status_code=503, detail="Event service unavailable")
+
         cur.execute("""
             INSERT INTO registrations (
                 user_id, event_id, payment_method, payment_status, payment_reference,
@@ -206,7 +216,23 @@ def register(reg: RegistrationCreate):
         return {"message": "Registration successful", "registration": new_reg}
     except psycopg2.IntegrityError:
         conn.rollback()
+        if increment_done:
+            try:
+                httpx.patch(f"{EVENT_SERVICE_URL}/events/{reg.event_id}/decrement-registration")
+            except Exception:
+                pass
         raise HTTPException(status_code=409, detail="User already registered for this event")
+    except HTTPException:
+        conn.rollback()
+        raise
+    except Exception as e:
+        conn.rollback()
+        if increment_done:
+            try:
+                httpx.patch(f"{EVENT_SERVICE_URL}/events/{reg.event_id}/decrement-registration")
+            except Exception:
+                pass
+        raise HTTPException(status_code=400, detail=str(e))
     finally:
         cur.close()
         conn.close()
