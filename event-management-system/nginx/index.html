@@ -60,15 +60,15 @@
   <div class="section">
     <h2>🔧 API Explorer</h2>
     <div class="tabs">
-      <div class="tab active" onclick="switchTab('users')">Users</div>
-      <div class="tab" onclick="switchTab('events')">Events</div>
-      <div class="tab" onclick="switchTab('registrations')">Registrations</div>
-      <div class="tab" onclick="switchTab('notifications')">Notifications</div>
+      <div class="tab active" onclick="switchTab('users', this)">Users</div>
+      <div class="tab" onclick="switchTab('events', this)">Events</div>
+      <div class="tab" onclick="switchTab('registrations', this)">Registrations</div>
+      <div class="tab" onclick="switchTab('notifications', this)">Notifications</div>
     </div>
 
     <!-- Users tab -->
     <div id="tab-users">
-      <form onsubmit="registerUser(event)">
+      <form onsubmit="return registerUser(event)">
         <input name="username" placeholder="Username" required>
         <input name="email" type="email" placeholder="Email" required>
         <input name="password" type="password" placeholder="Password" required>
@@ -81,7 +81,7 @@
 
     <!-- Events tab -->
     <div id="tab-events" class="hidden">
-      <form onsubmit="createEvent(event)">
+      <form onsubmit="return createEvent(event)">
         <input name="title" placeholder="Event title" required>
         <input name="description" placeholder="Description">
         <select name="event_type"><option>conference</option><option>workshop</option><option>seminar</option></select>
@@ -99,7 +99,7 @@
 
     <!-- Registrations tab -->
     <div id="tab-registrations" class="hidden">
-      <form onsubmit="createRegistration(event)">
+      <form onsubmit="return createRegistration(event)">
         <input name="user_id" type="number" placeholder="User ID" required>
         <input name="event_id" type="number" placeholder="Event ID" required>
         <select name="payment_method"><option>free</option><option>credit_card</option><option>paypal</option></select>
@@ -110,7 +110,7 @@
 
     <!-- Notifications tab -->
     <div id="tab-notifications" class="hidden">
-      <form onsubmit="getNotifications(event)">
+      <form onsubmit="return getNotifications(event)">
         <input name="user_id" type="number" placeholder="User ID" required>
         <button class="btn" type="submit">Get Notifications</button>
       </form>
@@ -149,11 +149,11 @@ async function checkHealth() {
   document.getElementById('healthy-count').textContent = healthy;
 }
 
-function switchTab(name) {
+function switchTab(name, tabEl) {
   document.querySelectorAll('[id^="tab-"]').forEach(t => t.classList.add('hidden'));
   document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
   document.getElementById('tab-' + name).classList.remove('hidden');
-  event.target.classList.add('active');
+  if (tabEl) tabEl.classList.add('active');
 }
 
 async function apiCall(url, method, body, respId) {
@@ -171,12 +171,13 @@ async function apiCall(url, method, body, respId) {
 }
 
 async function registerUser(e) {
-  e.preventDefault();
+  if (e && e.preventDefault) e.preventDefault();
   const f = e.target;
   await apiCall('/api/users/register', 'POST', {
     username: f.username.value, email: f.email.value,
     password: f.password.value, full_name: f.full_name.value
   }, 'resp-users');
+  return false;
 }
 
 async function listUsers() {
@@ -184,7 +185,7 @@ async function listUsers() {
 }
 
 async function createEvent(e) {
-  e.preventDefault();
+  if (e && e.preventDefault) e.preventDefault();
   const f = e.target;
   await apiCall('/api/events', 'POST', {
     title: f.title.value, description: f.description.value,
@@ -194,6 +195,7 @@ async function createEvent(e) {
     organizer_id: parseInt(f.organizer_id.value),
     ticket_price: parseFloat(f.ticket_price.value)
   }, 'resp-events');
+  return false;
 }
 
 async function listEvents() {
@@ -201,19 +203,21 @@ async function listEvents() {
 }
 
 async function createRegistration(e) {
-  e.preventDefault();
+  if (e && e.preventDefault) e.preventDefault();
   const f = e.target;
   await apiCall('/api/registrations', 'POST', {
     user_id: parseInt(f.user_id.value),
     event_id: parseInt(f.event_id.value),
     payment_method: f.payment_method.value
   }, 'resp-registrations');
+  return false;
 }
 
 async function getNotifications(e) {
-  e.preventDefault();
+  if (e && e.preventDefault) e.preventDefault();
   const uid = e.target.user_id.value;
   await apiCall(`/api/notifications/user/${uid}`, 'GET', null, 'resp-notifications');
+  return false;
 }
 
 checkHealth();
