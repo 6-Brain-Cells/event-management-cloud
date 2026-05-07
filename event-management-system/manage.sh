@@ -64,7 +64,7 @@ case "$1" in
       test) echo "   Frontend:    http://localhost:8081" ;;
       prod) echo "   Frontend:    http://localhost:8082" ;;
     esac
-    [ "${3:-}" = "--monitor" ] && echo "   Prometheus:  http://localhost:9090" && echo "   Grafana:     http://localhost:3000 (admin/admin)"
+    [ "${3:-}" = "--monitor" ] && echo "   Prometheus:  http://localhost:9090" && echo "   Grafana:     http://localhost:3000 (admin/admin)" && echo "   Loki:        http://localhost:3100"
     ;;
 
   down)

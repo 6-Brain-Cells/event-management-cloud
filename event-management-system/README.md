@@ -323,13 +323,16 @@ Add the full monitoring stack to any environment:
 
 # Prometheus:  http://localhost:9090
 # Grafana:     http://localhost:3000  (login: admin / admin)
+# Loki:        http://localhost:3100
 ```
 
 **Grafana quick setup:**
 
 1. Add data source: Prometheus → URL: `http://prometheus:9090`
-2. Import dashboard **1860** — Node Exporter Full (host metrics)
-3. Import dashboard **9628** — PostgreSQL metrics
+2. Add data source: Loki → URL: `http://loki:3100`
+3. Explore logs in Grafana: Explore → select Loki → query `{job="docker"}`
+4. Import dashboard **1860** — Node Exporter Full (host metrics)
+5. Import dashboard **9628** — PostgreSQL metrics
 
 ---
 
