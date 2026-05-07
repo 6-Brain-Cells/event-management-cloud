@@ -56,7 +56,7 @@ class PaymentProcessRequest(BaseModel):
     amount: float
     force_decline: bool = False
 
-SUPPORTED_PAYMENT_METHODS = {"free", "card", "paypal", "bank_transfer"}
+SUPPORTED_PAYMENT_METHODS = {"free", "card", "credit_card", "paypal", "bank_transfer"}
 
 @app.on_event("startup")
 def startup():
@@ -94,6 +94,9 @@ def generate_ticket_number(reg_id: int) -> str:
 
 def process_payment_mock(payment_method: str, amount: float, force_decline: bool = False) -> dict:
     method = (payment_method or "free").lower()
+    # UI may send credit_card; treat it as card for the simulator.
+    if method == "credit_card":
+        method = "card"
     if method not in SUPPORTED_PAYMENT_METHODS:
         raise HTTPException(status_code=400, detail=f"Unsupported payment method: {payment_method}")
     if amount < 0:

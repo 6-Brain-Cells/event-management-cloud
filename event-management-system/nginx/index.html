@@ -68,7 +68,7 @@
 
     <!-- Users tab -->
     <div id="tab-users">
-      <form onsubmit="return registerUser(this)">
+      <form onsubmit="registerUser(event); return false;">
         <input name="username" placeholder="Username" required>
         <input name="email" type="email" placeholder="Email" required>
         <input name="password" type="password" placeholder="Password" required>
@@ -81,7 +81,7 @@
 
     <!-- Events tab -->
     <div id="tab-events" class="hidden">
-      <form onsubmit="return createEvent(this)">
+      <form onsubmit="createEvent(event); return false;">
         <input name="title" placeholder="Event title" required>
         <input name="description" placeholder="Description">
         <select name="event_type"><option>conference</option><option>workshop</option><option>seminar</option></select>
@@ -99,7 +99,7 @@
 
     <!-- Registrations tab -->
     <div id="tab-registrations" class="hidden">
-      <form onsubmit="return createRegistration(this)">
+      <form onsubmit="createRegistration(event); return false;">
         <input name="user_id" type="number" placeholder="User ID" required>
         <input name="event_id" type="number" placeholder="Event ID" required>
         <select name="payment_method"><option>free</option><option>credit_card</option><option>paypal</option></select>
@@ -110,7 +110,7 @@
 
     <!-- Notifications tab -->
     <div id="tab-notifications" class="hidden">
-      <form onsubmit="return getNotifications(this)">
+      <form onsubmit="getNotifications(event); return false;">
         <input name="user_id" type="number" placeholder="User ID" required>
         <button class="btn" type="submit">Get Notifications</button>
       </form>
@@ -170,7 +170,8 @@ async function apiCall(url, method, body, respId) {
   }
 }
 
-async function registerUser(f) {
+async function registerUser(e) {
+  const f = e.target;
   await apiCall('/api/users/register', 'POST', {
     username: f.username.value, email: f.email.value,
     password: f.password.value, full_name: f.full_name.value
@@ -182,7 +183,8 @@ async function listUsers() {
   await apiCall('/api/users', 'GET', null, 'resp-users');
 }
 
-async function createEvent(f) {
+async function createEvent(e) {
+  const f = e.target;
   await apiCall('/api/events', 'POST', {
     title: f.title.value, description: f.description.value,
     event_type: f.event_type.value, start_date: f.start_date.value,
@@ -198,7 +200,8 @@ async function listEvents() {
   await apiCall('/api/events', 'GET', null, 'resp-events');
 }
 
-async function createRegistration(f) {
+async function createRegistration(e) {
+  const f = e.target;
   await apiCall('/api/registrations', 'POST', {
     user_id: parseInt(f.user_id.value),
     event_id: parseInt(f.event_id.value),
@@ -207,7 +210,8 @@ async function createRegistration(f) {
   return false;
 }
 
-async function getNotifications(f) {
+async function getNotifications(e) {
+  const f = e.target;
   const uid = f.user_id.value;
   await apiCall(`/api/notifications/user/${uid}`, 'GET', null, 'resp-notifications');
   return false;
