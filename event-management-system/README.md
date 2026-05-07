@@ -36,7 +36,7 @@ Built with Docker, Docker Compose (dev / test / prod environments), and Kubernet
 |---|---|---|
 | **user-service** | 8001 | Registration, login, user profiles, token auth via Redis |
 | **event-service** | 8002 | Create/manage events, schedules, capacity |
-| **registration-service** | 8003 | Event bookings, ticket generation, payment status |
+| **registration-service** | 8003 | Event bookings, ticket generation, mock payment processing |
 | **notification-service** | 8004 | Reminders, async event handling via Redis Pub/Sub |
 | **nginx** | 80 | API gateway + serves frontend dashboard |
 | **postgres** | 5432 | Primary relational database |
@@ -230,7 +230,7 @@ Production differences from dev:
 - No exposed DB or Redis ports
 - CPU and memory limits enforced per container
 - `restart: always` policies
-- 2 replicas of user-service and event-service
+- `user-service` and `event-service` are scaled to 2 replicas by `manage.sh up prod` using `docker compose --scale`
 
 ### Running all three environments simultaneously
 
@@ -287,8 +287,14 @@ GET    /api/registrations/{id}      Get registration by ID
 GET    /api/registrations/user/{id} All registrations for a user
 GET    /api/registrations/event/{id} All confirmed attendees for an event
 PATCH  /api/registrations/{id}/payment  Update payment status
+POST   /api/registrations/{id}/process-payment  Process payment with simulated gateway
 DELETE /api/registrations/{id}      Cancel registration
 ```
+
+Payment processing notes:
+- Registrations now run through a simulated gateway flow (`free`, `card`, `paypal`, `bank_transfer`)
+- Paid registrations store `payment_reference`, `payment_gateway`, and `payment_processed_at`
+- This satisfies payment-processing behavior without relying on external provider credentials
 
 ### Notification Service — `http://localhost:8080/api/notifications`
 

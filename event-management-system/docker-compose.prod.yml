@@ -31,12 +31,8 @@ services:
 
   user-service:
     restart: always
-    deploy:
-      replicas: 2   # Scale up for production load
-      resources:
-        limits:
-          cpus: '0.5'
-          memory: 256M
+    cpus: 0.5
+    mem_limit: 256m
     environment:
       ENV: production
       LOG_LEVEL: warning
@@ -45,12 +41,8 @@ services:
 
   event-service:
     restart: always
-    deploy:
-      replicas: 2
-      resources:
-        limits:
-          cpus: '0.5'
-          memory: 256M
+    cpus: 0.5
+    mem_limit: 256m
     environment:
       ENV: production
       LOG_LEVEL: warning
@@ -59,11 +51,8 @@ services:
 
   registration-service:
     restart: always
-    deploy:
-      resources:
-        limits:
-          cpus: '0.5'
-          memory: 256M
+    cpus: 0.5
+    mem_limit: 256m
     environment:
       ENV: production
       LOG_LEVEL: warning
@@ -72,11 +61,8 @@ services:
 
   notification-service:
     restart: always
-    deploy:
-      resources:
-        limits:
-          cpus: '0.25'
-          memory: 128M
+    cpus: 0.25
+    mem_limit: 128m
     environment:
       ENV: production
       LOG_LEVEL: warning
