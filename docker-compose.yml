@@ -1,0 +1,109 @@
+version: "3.9"
+
+# ─────────────────────────────────────────────
+# BASE docker-compose.yml  (shared definitions)
+# Override with:
+#   docker-compose -f docker-compose.yml -f docker-compose.dev.yml up
+#   docker-compose -f docker-compose.yml -f docker-compose.test.yml up
+#   docker-compose -f docker-compose.yml -f docker-compose.prod.yml up
+# ─────────────────────────────────────────────
+
+x-common-env: &common-env
+  DB_HOST: postgres
+  DB_PORT: "5432"
+  DB_NAME: eventdb
+  DB_USER: postgres
+  DB_PASSWORD: postgres
+  REDIS_HOST: redis
+  REDIS_PORT: "6379"
+
+x-service-defaults: &service-defaults
+  restart: unless-stopped
+  networks:
+    - event-network
+  depends_on:
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+
+services:
+  # ── Infrastructure ──────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: eventdb
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - event-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    networks:
+      - event-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Microservices ────────────────────────────
+  user-service:
+    <<: *service-defaults
+    build:
+      context: ./services/user-service
+    environment:
+      <<: *common-env
+
+  event-service:
+    <<: *service-defaults
+    build:
+      context: ./services/event-service
+    environment:
+      <<: *common-env
+
+  registration-service:
+    <<: *service-defaults
+    build:
+      context: ./services/registration-service
+    environment:
+      <<: *common-env
+      EVENT_SERVICE_URL: http://event-service:8000
+
+  notification-service:
+    <<: *service-defaults
+    build:
+      context: ./services/notification-service
+    environment:
+      <<: *common-env
+
+  # ── API Gateway / Frontend ────────────────────
+  nginx:
+    build:
+      context: ./nginx
+    networks:
+      - event-network
+    depends_on:
+      - user-service
+      - event-service
+      - registration-service
+      - notification-service
+
+networks:
+  event-network:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  redis_data:

@@ -1,0 +1,301 @@
+# ───────────────────────────────────────────────────
+# PostgreSQL
+# ───────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  labels:
+    app: postgres
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          ports:
+            - containerPort: 5432
+          env:
+            - name: POSTGRES_DB
+              value: "eventdb"
+            - name: POSTGRES_USER
+              value: "postgres"
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: event-mgmt-secrets
+                  key: DB_PASSWORD
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "postgres"]
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          volumeMounts:
+            - name: postgres-storage
+              mountPath: /var/lib/postgresql/data
+      volumes:
+        - name: postgres-storage
+          emptyDir: {}    # Use PersistentVolumeClaim in real prod
+---
+# ───────────────────────────────────────────────────
+# Redis
+# ───────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+  labels:
+    app: redis
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+    spec:
+      containers:
+        - name: redis
+          image: redis:7-alpine
+          command: ["redis-server", "--appendonly", "yes"]
+          ports:
+            - containerPort: 6379
+          readinessProbe:
+            exec:
+              command: ["redis-cli", "ping"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+---
+# ───────────────────────────────────────────────────
+# User Service
+# ───────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: user-service
+  labels:
+    app: user-service
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: user-service
+  template:
+    metadata:
+      labels:
+        app: user-service
+    spec:
+      containers:
+        - name: user-service
+          image: event-mgmt/user-service:latest
+          imagePullPolicy: Never     # Use local image (Minikube)
+          ports:
+            - containerPort: 8000
+          envFrom:
+            - configMapRef:
+                name: event-mgmt-config
+          env:
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: event-mgmt-secrets
+                  key: DB_PASSWORD
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "256Mi"
+---
+# ───────────────────────────────────────────────────
+# Event Service
+# ───────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: event-service
+  labels:
+    app: event-service
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: event-service
+  template:
+    metadata:
+      labels:
+        app: event-service
+    spec:
+      containers:
+        - name: event-service
+          image: event-mgmt/event-service:latest
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 8000
+          envFrom:
+            - configMapRef:
+                name: event-mgmt-config
+          env:
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: event-mgmt-secrets
+                  key: DB_PASSWORD
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "256Mi"
+---
+# ───────────────────────────────────────────────────
+# Registration Service
+# ───────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: registration-service
+  labels:
+    app: registration-service
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: registration-service
+  template:
+    metadata:
+      labels:
+        app: registration-service
+    spec:
+      containers:
+        - name: registration-service
+          image: event-mgmt/registration-service:latest
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 8000
+          envFrom:
+            - configMapRef:
+                name: event-mgmt-config
+          env:
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: event-mgmt-secrets
+                  key: DB_PASSWORD
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "256Mi"
+---
+# ───────────────────────────────────────────────────
+# Notification Service
+# ───────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: notification-service
+  labels:
+    app: notification-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: notification-service
+  template:
+    metadata:
+      labels:
+        app: notification-service
+    spec:
+      containers:
+        - name: notification-service
+          image: event-mgmt/notification-service:latest
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 8000
+          envFrom:
+            - configMapRef:
+                name: event-mgmt-config
+          env:
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: event-mgmt-secrets
+                  key: DB_PASSWORD
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "250m"
+              memory: "128Mi"
+---
+# ───────────────────────────────────────────────────
+# Nginx API Gateway
+# ───────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx
+  labels:
+    app: nginx
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: nginx
+  template:
+    metadata:
+      labels:
+        app: nginx
+    spec:
+      containers:
+        - name: nginx
+          image: event-mgmt/nginx:latest
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 80
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "32Mi"
+            limits:
+              cpu: "200m"
+              memory: "64Mi"

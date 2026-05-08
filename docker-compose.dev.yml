@@ -1,0 +1,60 @@
+version: "3.9"
+
+# ─────────────────────────────────────────────
+# DEVELOPMENT environment
+# Run: docker-compose -f docker-compose.yml -f docker-compose.dev.yml up --build
+# Frontend: http://localhost:8080
+# ─────────────────────────────────────────────
+
+services:
+  nginx:
+    ports:
+      - "8080:80"   # Dev port
+
+  postgres:
+    ports:
+      - "5432:5432"  # Exposed for local DB tools (DBeaver, psql)
+
+  redis:
+    ports:
+      - "6379:6379"  # Exposed for local Redis inspection
+
+  user-service:
+    volumes:
+      - ./services/user-service:/app   # Hot-reload: code changes reflect without rebuild
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+    ports:
+      - "8001:8000"   # Direct service access for debugging
+    environment:
+      ENV: development
+      LOG_LEVEL: debug
+
+  event-service:
+    volumes:
+      - ./services/event-service:/app
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+    ports:
+      - "8002:8000"
+    environment:
+      ENV: development
+      LOG_LEVEL: debug
+
+  registration-service:
+    volumes:
+      - ./services/registration-service:/app
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+    ports:
+      - "8003:8000"
+    environment:
+      ENV: development
+      LOG_LEVEL: debug
+
+  notification-service:
+    volumes:
+      - ./services/notification-service:/app
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+    ports:
+      - "8004:8000"
+    environment:
+      ENV: development
+      LOG_LEVEL: debug

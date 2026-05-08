@@ -94,61 +94,89 @@ All service images use multi-stage builds to minimize final image size (~80–10
 
 ---
 
-## Native Ubuntu Setup Guide
+## Windows Setup Guide (WSL2 + Docker Desktop)
 
-The project runs natively on Linux.
+The project runs on Linux. On Windows, WSL2 provides a real Linux kernel that fully
+satisfies the "Linux machine" requirement — `uname -a` inside it shows a Linux kernel.
 
-### 1. Install Docker and Docker Compose
+### 1. Install WSL2
 
-If you haven't already, install Docker on your Ubuntu system:
+Open PowerShell as Administrator:
 
-```bash
-# Add Docker's official GPG key:
-sudo apt-get update
-sudo apt-get install ca-certificates curl
-sudo install -m 0755 -d /etc/apt/keyrings
-sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
-sudo chmod a+r /etc/apt/keyrings/docker.asc
-
-# Add the repository to Apt sources:
-echo \
-  "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu \
-  $(. /etc/os-release && echo \"$VERSION_CODENAME\") stable" | \
-  sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
-sudo apt-get update
-
-# Install the Docker packages
-sudo apt-get install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+```powershell
+wsl --install
 ```
 
-### 2. Manage Docker as a non-root user
+Restart your PC when prompted. After restart Ubuntu opens automatically — set a username
+and password when asked.
 
-To run docker without `sudo`:
+> **Note:** After the restart you will land directly inside the Ubuntu terminal.
+> `wsl --shutdown` is a PowerShell command — if you need to run it, type `exit` first
+> to leave Ubuntu, then run it in PowerShell.
+
+### 2. Connect Docker Desktop to WSL2
+
+Open Docker Desktop → ⚙️ Settings → Resources → WSL Integration:
+
+- "Enable integration with my default WSL distro" → **ON**
+- Toggle Ubuntu → **ON**
+
+Click **Apply & Restart**.
+
+### 3. Limit RAM (important for older / slower laptops)
+
+In PowerShell:
+
+```powershell
+notepad "$env:USERPROFILE\.wslconfig"
+```
+
+Paste this, save, and close Notepad:
+
+```ini
+[wsl2]
+memory=3GB
+processors=2
+swap=1GB
+```
+
+Then shut down WSL so the limits apply on next launch:
+
+```powershell
+wsl --shutdown
+```
+
+### 4. Open Ubuntu and verify Docker works
+
+Search **Ubuntu** in the Start menu and open it. You should see a prompt like
+`user@LAPTOP:~$`. Run:
+
+```bash
+docker ps
+```
+
+Expected output: an empty table with no errors. If you get a permission error run:
 
 ```bash
 sudo usermod -aG docker $USER
 newgrp docker
 ```
 
-Verify Docker works by running:
+### 5. Copy the project into WSL2 and run it
+
+Windows drives are mounted under `/mnt/` in WSL2. For example `E:\cloud\` becomes
+`/mnt/e/cloud/`. Adjust the path below to wherever you extracted the project:
 
 ```bash
-docker ps
-```
-
-Expected output: an empty table with no errors.
-
-### 3. Navigate to the project and run it
-
-Open your terminal and navigate to where you extracted or cloned the project:
-
-```bash
+cp /mnt/e/cloud/event-management-system.tar.gz ~/
+cd ~
+tar -xzf event-management-system.tar.gz
 cd event-management-system
 chmod +x manage.sh
 ./manage.sh up dev
 ```
 
-The first run takes a few minutes while Docker builds all images.
+The first run takes 5–10 minutes on a slow laptop while Docker builds all images.
 When you see:
 
 ```
@@ -156,7 +184,8 @@ When you see:
    Frontend:    http://localhost:8080
 ```
 
-Open `http://localhost:8080` in your browser.
+Open `http://localhost:8080` in your **Windows** browser (Chrome, Edge, etc.).
+WSL2 automatically forwards ports to Windows so localhost works from either side.
 
 ---
 
@@ -278,7 +307,7 @@ Minikube is the lightweight local Kubernetes option. Using `--driver=docker` run
 entire cluster inside a Docker container instead of a VM — much easier on older hardware.
 
 ```bash
-# Install Minikube
+# Install Minikube inside WSL2
 curl -LO https://storage.googleapis.com/minikube/releases/latest/minikube-linux-amd64
 sudo install minikube-linux-amd64 /usr/local/bin/minikube
 sudo snap install kubectl --classic
@@ -430,6 +459,16 @@ Then rebuild nginx:
 docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build -d nginx
 ```
 
+---
+
+### Issue 3 — "wsl: command not found" in Ubuntu terminal
+
+**Cause:** `wsl --shutdown` is a PowerShell/Windows command. Running it inside the
+Ubuntu terminal doesn't work.
+
+**Fix:** Type `exit` to leave Ubuntu and return to PowerShell, then run the command there.
+
+---
 
 ### General troubleshooting tips
 

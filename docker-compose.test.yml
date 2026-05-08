@@ -1,0 +1,70 @@
+version: "3.9"
+
+# ─────────────────────────────────────────────
+# TESTING environment
+# Run: docker-compose -f docker-compose.yml -f docker-compose.test.yml up --build
+# Frontend: http://localhost:8081
+# Uses a separate DB (testdb) so tests don't pollute dev data
+# ─────────────────────────────────────────────
+
+services:
+  nginx:
+    ports:
+      - "8081:80"   # Test port (different from dev)
+
+  postgres:
+    environment:
+      POSTGRES_DB: testdb    # Isolated test database
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    volumes:
+      - postgres_test_data:/var/lib/postgresql/data  # Separate volume
+
+  user-service:
+    environment:
+      DB_NAME: testdb
+      ENV: testing
+      LOG_LEVEL: info
+
+  event-service:
+    environment:
+      DB_NAME: testdb
+      ENV: testing
+      LOG_LEVEL: info
+
+  registration-service:
+    environment:
+      DB_NAME: testdb
+      ENV: testing
+      LOG_LEVEL: info
+
+  notification-service:
+    environment:
+      DB_NAME: testdb
+      ENV: testing
+      LOG_LEVEL: info
+
+  # ── Test runner (exits after tests complete) ──
+  test-runner:
+    image: python:3.11-slim
+    networks:
+      - event-network
+    depends_on:
+      - user-service
+      - event-service
+      - registration-service
+      - notification-service
+    volumes:
+      - ./tests:/tests
+    working_dir: /tests
+    command: >
+      sh -c "
+        pip install -q requests pytest &&
+        sleep 10 &&
+        python -m pytest test_api.py -v --tb=short
+      "
+    environment:
+      BASE_URL: http://nginx
+
+volumes:
+  postgres_test_data:

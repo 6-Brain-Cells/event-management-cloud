@@ -1,0 +1,88 @@
+version: "3.9"
+
+# ─────────────────────────────────────────────
+# PRODUCTION environment
+# Run: docker-compose -f docker-compose.yml -f docker-compose.prod.yml up --build -d
+# Frontend: http://localhost:8082  (or configure your reverse proxy)
+# ─────────────────────────────────────────────
+
+services:
+  nginx:
+    ports:
+      - "8082:80"   # Prod port (use 80 in real deployment)
+    restart: always
+
+  postgres:
+    restart: always
+    environment:
+      POSTGRES_DB: eventdb_prod
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-changeme_in_prod}   # Use .env file!
+    volumes:
+      - postgres_prod_data:/var/lib/postgresql/data
+    # No exposed port in prod — only internal access
+
+  redis:
+    restart: always
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:-changeme_in_prod}
+    volumes:
+      - redis_prod_data:/data
+    # No exposed port in prod
+
+  user-service:
+    restart: always
+    deploy:
+      replicas: 2   # Scale up for production load
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
+    environment:
+      ENV: production
+      LOG_LEVEL: warning
+      DB_NAME: eventdb_prod
+      DB_PASSWORD: ${DB_PASSWORD:-changeme_in_prod}
+
+  event-service:
+    restart: always
+    deploy:
+      replicas: 2
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
+    environment:
+      ENV: production
+      LOG_LEVEL: warning
+      DB_NAME: eventdb_prod
+      DB_PASSWORD: ${DB_PASSWORD:-changeme_in_prod}
+
+  registration-service:
+    restart: always
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
+    environment:
+      ENV: production
+      LOG_LEVEL: warning
+      DB_NAME: eventdb_prod
+      DB_PASSWORD: ${DB_PASSWORD:-changeme_in_prod}
+
+  notification-service:
+    restart: always
+    deploy:
+      resources:
+        limits:
+          cpus: '0.25'
+          memory: 128M
+    environment:
+      ENV: production
+      LOG_LEVEL: warning
+      DB_NAME: eventdb_prod
+      DB_PASSWORD: ${DB_PASSWORD:-changeme_in_prod}
+
+volumes:
+  postgres_prod_data:
+  redis_prod_data:
