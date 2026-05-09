@@ -1,5 +1,6 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from prometheus_fastapi_instrumentator import Instrumentator
 from pydantic import BaseModel
 from typing import Optional
 import psycopg2
@@ -9,6 +10,8 @@ import redis
 import json
 import httpx
 from datetime import datetime
+import random
+import secrets
 
 app = FastAPI(title="Registration Service", version="1.0.0")
 
@@ -18,6 +21,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+Instrumentator().instrument(app).expose(app, endpoint="/metrics")
 
 EVENT_SERVICE_URL = os.getenv("EVENT_SERVICE_URL", "http://event-service:8000")
 
@@ -47,6 +51,13 @@ class RegistrationCreate(BaseModel):
 class PaymentUpdate(BaseModel):
     payment_status: str  # pending, paid, refunded
 
+class PaymentProcessRequest(BaseModel):
+    payment_method: str
+    amount: float
+    force_decline: bool = False
+
+SUPPORTED_PAYMENT_METHODS = {"free", "card", "credit_card", "paypal", "bank_transfer"}
+
 @app.on_event("startup")
 def startup():
     try:
@@ -66,6 +77,9 @@ def startup():
                 UNIQUE(user_id, event_id)
             )
         """)
+        cur.execute("ALTER TABLE registrations ADD COLUMN IF NOT EXISTS payment_reference VARCHAR(100)")
+        cur.execute("ALTER TABLE registrations ADD COLUMN IF NOT EXISTS payment_gateway VARCHAR(50)")
+        cur.execute("ALTER TABLE registrations ADD COLUMN IF NOT EXISTS payment_processed_at TIMESTAMP")
         conn.commit()
         cur.close()
         conn.close()
@@ -78,30 +92,106 @@ def generate_ticket_number(reg_id: int) -> str:
     suffix = ''.join(random.choices(string.ascii_uppercase + string.digits, k=6))
     return f"{prefix}-{reg_id:04d}-{suffix}"
 
+def process_payment_mock(payment_method: str, amount: float, force_decline: bool = False) -> dict:
+    method = (payment_method or "free").lower()
+    # UI may send credit_card; treat it as card for the simulator.
+    if method == "credit_card":
+        method = "card"
+    if method not in SUPPORTED_PAYMENT_METHODS:
+        raise HTTPException(status_code=400, detail=f"Unsupported payment method: {payment_method}")
+    if amount < 0:
+        raise HTTPException(status_code=400, detail="Payment amount cannot be negative")
+    if method == "free" or amount == 0:
+        return {
+            "status": "paid",
+            "gateway": "simulated-free",
+            "reference": f"FREE-{secrets.token_hex(4).upper()}",
+        }
+    if force_decline or random.random() < 0.05:
+        return {
+            "status": "failed",
+            "gateway": f"simulated-{method}",
+            "reference": f"DECLINED-{secrets.token_hex(4).upper()}",
+        }
+    return {
+        "status": "paid",
+        "gateway": f"simulated-{method}",
+        "reference": f"TXN-{secrets.token_hex(8).upper()}",
+    }
+
 @app.get("/health")
 def health():
     return {"status": "healthy", "service": "registration-service"}
 
+@app.get("/registrations/health")
+def registrations_health():
+    return {"status": "healthy", "service": "registration-service"}
+
 @app.post("/registrations")
 def register(reg: RegistrationCreate):
-    # Check with event service that capacity exists
+    # Get event and ticket price from event service
     try:
-        resp = httpx.patch(f"{EVENT_SERVICE_URL}/events/{reg.event_id}/increment-registration")
-        if resp.status_code == 409:
-            raise HTTPException(status_code=409, detail="Event is full")
-        elif resp.status_code != 200:
-            raise HTTPException(status_code=400, detail="Could not verify event capacity")
+        event_resp = httpx.get(f"{EVENT_SERVICE_URL}/events/{reg.event_id}")
+        if event_resp.status_code == 404:
+            raise HTTPException(status_code=404, detail="Event not found")
+        if event_resp.status_code != 200:
+            raise HTTPException(status_code=400, detail="Could not fetch event details")
+        event_data = event_resp.json()
     except httpx.ConnectError:
         raise HTTPException(status_code=503, detail="Event service unavailable")
 
+    amount = float(event_data.get("ticket_price") or 0)
+    payment_result = process_payment_mock(reg.payment_method or "free", amount)
+    if payment_result["status"] != "paid":
+        raise HTTPException(
+            status_code=402,
+            detail={
+                "message": "Payment failed",
+                "payment_status": payment_result["status"],
+                "payment_reference": payment_result["reference"],
+                "payment_gateway": payment_result["gateway"],
+            },
+        )
+
     conn = get_db()
     cur = conn.cursor()
+    increment_done = False
     try:
+        # Fast duplicate guard to avoid consuming capacity for already-registered users.
+        cur.execute(
+            "SELECT id FROM registrations WHERE user_id=%s AND event_id=%s",
+            (reg.user_id, reg.event_id),
+        )
+        if cur.fetchone():
+            raise HTTPException(status_code=409, detail="User already registered for this event")
+
+        # Check with event service that capacity exists.
+        try:
+            resp = httpx.patch(f"{EVENT_SERVICE_URL}/events/{reg.event_id}/increment-registration")
+            if resp.status_code == 409:
+                raise HTTPException(status_code=409, detail="Event is full")
+            elif resp.status_code != 200:
+                raise HTTPException(status_code=400, detail="Could not verify event capacity")
+            increment_done = True
+        except httpx.ConnectError:
+            raise HTTPException(status_code=503, detail="Event service unavailable")
+
         cur.execute("""
-            INSERT INTO registrations (user_id, event_id, payment_method, notes)
-            VALUES (%s, %s, %s, %s)
+            INSERT INTO registrations (
+                user_id, event_id, payment_method, payment_status, payment_reference,
+                payment_gateway, payment_processed_at, notes
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, NOW(), %s)
             RETURNING *
-        """, (reg.user_id, reg.event_id, reg.payment_method, reg.notes))
+        """, (
+            reg.user_id,
+            reg.event_id,
+            reg.payment_method,
+            payment_result["status"],
+            payment_result["reference"],
+            payment_result["gateway"],
+            reg.notes
+        ))
         new_reg = dict(cur.fetchone())
         # Generate ticket number
         ticket = generate_ticket_number(new_reg["id"])
@@ -129,7 +219,23 @@ def register(reg: RegistrationCreate):
         return {"message": "Registration successful", "registration": new_reg}
     except psycopg2.IntegrityError:
         conn.rollback()
+        if increment_done:
+            try:
+                httpx.patch(f"{EVENT_SERVICE_URL}/events/{reg.event_id}/decrement-registration")
+            except Exception:
+                pass
         raise HTTPException(status_code=409, detail="User already registered for this event")
+    except HTTPException:
+        conn.rollback()
+        raise
+    except Exception as e:
+        conn.rollback()
+        if increment_done:
+            try:
+                httpx.patch(f"{EVENT_SERVICE_URL}/events/{reg.event_id}/decrement-registration")
+            except Exception:
+                pass
+        raise HTTPException(status_code=400, detail=str(e))
     finally:
         cur.close()
         conn.close()
@@ -202,6 +308,36 @@ def update_payment(registration_id: int, payment: PaymentUpdate):
             raise HTTPException(status_code=404, detail="Registration not found")
         conn.commit()
         return {"message": "Payment status updated", "registration": dict(row)}
+    finally:
+        cur.close()
+        conn.close()
+
+@app.post("/registrations/{registration_id}/process-payment")
+def process_registration_payment(registration_id: int, payment: PaymentProcessRequest):
+    conn = get_db()
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT id, payment_status FROM registrations WHERE id=%s", (registration_id,))
+        row = cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Registration not found")
+
+        result = process_payment_mock(payment.payment_method, payment.amount, payment.force_decline)
+        cur.execute(
+            """
+            UPDATE registrations
+            SET payment_method=%s, payment_status=%s, payment_reference=%s,
+                payment_gateway=%s, payment_processed_at=NOW()
+            WHERE id=%s
+            RETURNING id, payment_method, payment_status, payment_reference, payment_gateway, payment_processed_at
+            """,
+            (payment.payment_method, result["status"], result["reference"], result["gateway"], registration_id)
+        )
+        updated = dict(cur.fetchone())
+        if isinstance(updated.get("payment_processed_at"), datetime):
+            updated["payment_processed_at"] = str(updated["payment_processed_at"])
+        conn.commit()
+        return {"message": "Payment processed", "payment": updated}
     finally:
         cur.close()
         conn.close()

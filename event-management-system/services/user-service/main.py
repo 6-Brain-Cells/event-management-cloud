@@ -1,5 +1,6 @@
 from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
+from prometheus_fastapi_instrumentator import Instrumentator
 from pydantic import BaseModel, EmailStr
 from typing import Optional
 import psycopg2
@@ -19,6 +20,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+Instrumentator().instrument(app).expose(app, endpoint="/metrics")
 
 # DB connection
 def get_db():
@@ -83,11 +85,24 @@ def startup():
 def health():
     return {"status": "healthy", "service": "user-service"}
 
+@app.get("/users/health")
+def users_health():
+    return {"status": "healthy", "service": "user-service"}
+
 @app.post("/users/register")
 def register(user: UserCreate):
     conn = get_db()
     cur = conn.cursor()
     try:
+        # Avoid inserting when username/email already exists.
+        # This prevents SERIAL sequence from being consumed on failed INSERTs.
+        cur.execute(
+            "SELECT id FROM users WHERE username=%s OR email=%s LIMIT 1",
+            (user.username, user.email),
+        )
+        if cur.fetchone():
+            raise HTTPException(status_code=400, detail="Username or email already exists")
+
         cur.execute(
             "INSERT INTO users (username, email, password_hash, full_name) VALUES (%s, %s, %s, %s) RETURNING id, username, email, full_name, created_at",
             (user.username, user.email, hash_password(user.password), user.full_name)

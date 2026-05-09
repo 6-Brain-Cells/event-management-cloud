@@ -7,7 +7,7 @@ Built with Docker, Docker Compose (dev / test / prod environments), and Kubernet
 
 ## Architecture
 
-```
+```text
                     ┌──────────────────────────────────────────┐
                     │         Nginx API Gateway (:80)          │
                     └──────┬──────────┬──────────┬────────────┘
@@ -33,10 +33,10 @@ Built with Docker, Docker Compose (dev / test / prod environments), and Kubernet
 ### Services
 
 | Service | Port | Responsibility |
-|---|---|---|
+| --- | --- | --- |
 | **user-service** | 8001 | Registration, login, user profiles, token auth via Redis |
 | **event-service** | 8002 | Create/manage events, schedules, capacity |
-| **registration-service** | 8003 | Event bookings, ticket generation, payment status |
+| **registration-service** | 8003 | Event bookings, ticket generation, mock payment processing |
 | **notification-service** | 8004 | Reminders, async event handling via Redis Pub/Sub |
 | **nginx** | 80 | API gateway + serves frontend dashboard |
 | **postgres** | 5432 | Primary relational database |
@@ -46,7 +46,7 @@ Built with Docker, Docker Compose (dev / test / prod environments), and Kubernet
 
 ## Project Structure
 
-```
+```text
 event-management-system/
 ├── manage.sh                        ← one-command environment manager
 ├── docker-compose.yml               ← base shared definitions
@@ -73,7 +73,8 @@ event-management-system/
 ├── monitoring/
 │   └── prometheus.yml
 └── tests/
-    └── test_api.py
+    ├── test_api.py
+    └── test_payment.py
 ```
 
 ---
@@ -81,7 +82,7 @@ event-management-system/
 ## Docker Images Used
 
 | Image | Purpose |
-|---|---|
+| --- | --- |
 | `python:3.11-slim` | Base for all FastAPI services (multi-stage build) |
 | `nginx:1.25-alpine` | API gateway + frontend |
 | `postgres:16-alpine` | Primary database |
@@ -94,98 +95,69 @@ All service images use multi-stage builds to minimize final image size (~80–10
 
 ---
 
-## Windows Setup Guide (WSL2 + Docker Desktop)
+## Native Ubuntu Setup Guide
 
-The project runs on Linux. On Windows, WSL2 provides a real Linux kernel that fully
-satisfies the "Linux machine" requirement — `uname -a` inside it shows a Linux kernel.
+The project runs natively on Linux.
 
-### 1. Install WSL2
+### 1. Install Docker and Docker Compose
 
-Open PowerShell as Administrator:
-
-```powershell
-wsl --install
-```
-
-Restart your PC when prompted. After restart Ubuntu opens automatically — set a username
-and password when asked.
-
-> **Note:** After the restart you will land directly inside the Ubuntu terminal.
-> `wsl --shutdown` is a PowerShell command — if you need to run it, type `exit` first
-> to leave Ubuntu, then run it in PowerShell.
-
-### 2. Connect Docker Desktop to WSL2
-
-Open Docker Desktop → ⚙️ Settings → Resources → WSL Integration:
-
-- "Enable integration with my default WSL distro" → **ON**
-- Toggle Ubuntu → **ON**
-
-Click **Apply & Restart**.
-
-### 3. Limit RAM (important for older / slower laptops)
-
-In PowerShell:
-
-```powershell
-notepad "$env:USERPROFILE\.wslconfig"
-```
-
-Paste this, save, and close Notepad:
-
-```ini
-[wsl2]
-memory=3GB
-processors=2
-swap=1GB
-```
-
-Then shut down WSL so the limits apply on next launch:
-
-```powershell
-wsl --shutdown
-```
-
-### 4. Open Ubuntu and verify Docker works
-
-Search **Ubuntu** in the Start menu and open it. You should see a prompt like
-`user@LAPTOP:~$`. Run:
+If you haven't already, install Docker on your Ubuntu system:
 
 ```bash
-docker ps
+# Add Docker's official GPG key:
+sudo apt-get update
+sudo apt-get install ca-certificates curl
+sudo install -m 0755 -d /etc/apt/keyrings
+sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+sudo chmod a+r /etc/apt/keyrings/docker.asc
+
+# Add the repository to Apt sources:
+echo \
+  "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu \
+  $(. /etc/os-release && echo \"$VERSION_CODENAME\") stable" | \
+  sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+sudo apt-get update
+
+# Install the Docker packages
+sudo apt-get install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 ```
 
-Expected output: an empty table with no errors. If you get a permission error run:
+### 2. Manage Docker as a non-root user
+
+To run docker without `sudo`:
 
 ```bash
 sudo usermod -aG docker $USER
 newgrp docker
 ```
 
-### 5. Copy the project into WSL2 and run it
-
-Windows drives are mounted under `/mnt/` in WSL2. For example `E:\cloud\` becomes
-`/mnt/e/cloud/`. Adjust the path below to wherever you extracted the project:
+Verify Docker works by running:
 
 ```bash
-cp /mnt/e/cloud/event-management-system.tar.gz ~/
-cd ~
-tar -xzf event-management-system.tar.gz
+docker ps
+```
+
+Expected output: an empty table with no errors.
+
+### 3. Navigate to the project and run it
+
+Open your terminal and navigate to where you extracted or cloned the project:
+
+```bash
 cd event-management-system
 chmod +x manage.sh
 ./manage.sh up dev
 ```
 
-The first run takes 5–10 minutes on a slow laptop while Docker builds all images.
+The first run takes a few minutes while Docker builds all images.
 When you see:
 
-```
+```text
 ✅  dev environment running:
    Frontend:    http://localhost:8080
 ```
 
-Open `http://localhost:8080` in your **Windows** browser (Chrome, Edge, etc.).
-WSL2 automatically forwards ports to Windows so localhost works from either side.
+Open `http://localhost:8080` in your browser.
 
 ---
 
@@ -227,10 +199,11 @@ echo "REDIS_PASSWORD=your_redis_password" >> .env
 ```
 
 Production differences from dev:
+
 - No exposed DB or Redis ports
 - CPU and memory limits enforced per container
 - `restart: always` policies
-- 2 replicas of user-service and event-service
+- `user-service` and `event-service` are scaled to 2 replicas by `manage.sh up prod` using `docker compose --scale`
 
 ### Running all three environments simultaneously
 
@@ -261,7 +234,7 @@ test/prod environments.
 
 ### User Service — `http://localhost:8080/api/users`
 
-```
+```text
 POST   /api/users/register          Register a new user
 POST   /api/users/login             Login → returns session token (stored in Redis)
 GET    /api/users                   List all active users
@@ -271,7 +244,7 @@ DELETE /api/users/{id}              Deactivate user
 
 ### Event Service — `http://localhost:8080/api/events`
 
-```
+```text
 POST   /api/events                  Create a new event
 GET    /api/events                  List events  (?event_type=conference|workshop|seminar)
 GET    /api/events/{id}             Get event details
@@ -281,18 +254,25 @@ DELETE /api/events/{id}             Cancel event (sets status=cancelled)
 
 ### Registration Service — `http://localhost:8080/api/registrations`
 
-```
+```text
 POST   /api/registrations           Register for event → returns ticket number
 GET    /api/registrations/{id}      Get registration by ID
 GET    /api/registrations/user/{id} All registrations for a user
 GET    /api/registrations/event/{id} All confirmed attendees for an event
 PATCH  /api/registrations/{id}/payment  Update payment status
+POST   /api/registrations/{id}/process-payment  Process payment with simulated gateway
 DELETE /api/registrations/{id}      Cancel registration
 ```
 
+Payment processing notes:
+
+- Registrations now run through a simulated gateway flow (`free`, `card`, `paypal`, `bank_transfer`)
+- Paid registrations store `payment_reference`, `payment_gateway`, and `payment_processed_at`
+- This satisfies payment-processing behavior without relying on external provider credentials
+
 ### Notification Service — `http://localhost:8080/api/notifications`
 
-```
+```text
 POST   /api/notifications           Send a manual notification
 GET    /api/notifications/user/{id} Get all notifications for a user
 PATCH  /api/notifications/{id}/read Mark notification as read
@@ -307,7 +287,7 @@ Minikube is the lightweight local Kubernetes option. Using `--driver=docker` run
 entire cluster inside a Docker container instead of a VM — much easier on older hardware.
 
 ```bash
-# Install Minikube inside WSL2
+# Install Minikube
 curl -LO https://storage.googleapis.com/minikube/releases/latest/minikube-linux-amd64
 sudo install minikube-linux-amd64 /usr/local/bin/minikube
 sudo snap install kubectl --classic
@@ -343,12 +323,16 @@ Add the full monitoring stack to any environment:
 
 # Prometheus:  http://localhost:9090
 # Grafana:     http://localhost:3000  (login: admin / admin)
+# Loki:        http://localhost:3100
 ```
 
 **Grafana quick setup:**
+
 1. Add data source: Prometheus → URL: `http://prometheus:9090`
-2. Import dashboard **1860** — Node Exporter Full (host metrics)
-3. Import dashboard **9628** — PostgreSQL metrics
+2. Add data source: Loki → URL: `http://loki:3100`
+3. Explore logs in Grafana: Explore → select Loki → query `{job="docker"}`
+4. Import dashboard **1860** — Node Exporter Full (host metrics)
+5. Import dashboard **9628** — PostgreSQL metrics
 
 ---
 
@@ -358,7 +342,7 @@ The system uses **Redis Pub/Sub** for decoupled async messaging between services
 No service calls another directly for notifications — they publish an event and move on.
 
 | Channel | Published by | Consumed by | When |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `notification_events` | Registration Service | Notification Service | User registers for an event |
 | `user_events` | User Service | Notification Service | New user account created |
 | `event_events` | Event Service | Notification Service | New event created |
@@ -366,7 +350,11 @@ No service calls another directly for notifications — they publish an event an
 The notification service runs a background thread that subscribes to all three channels
 and automatically stores the appropriate notification when any event arrives.
 
+Reminders and updates are user-visible in-app by default, with optional webhook
+forwarding by setting `NOTIFICATION_WEBHOOK_URL`.
+
 To watch it live:
+
 ```bash
 docker exec -it event-management-system-redis-1 redis-cli subscribe notification_events
 ```
@@ -398,6 +386,16 @@ docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build -d use
 
 ---
 
+## CI/CD
+
+Minimal CI is configured in `.github/workflows/ci.yml`.
+
+- Triggers on push and pull request
+- Uses GitHub Actions runner `ubuntu-latest`
+- Runs `./manage.sh test` to validate integration tests before merge
+
+---
+
 ## Debugging & Known Issues
 
 ### Issue 1 — nginx crashes: "unknown $remote_method variable"
@@ -405,7 +403,7 @@ docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build -d use
 **Symptom:** After `./manage.sh up dev`, nginx is missing from `docker ps`.
 Port 8080 is unreachable. Running `docker logs event-management-system-nginx-1` shows:
 
-```
+```text
 [emerg] 1#1: unknown "remote_method" variable
 ```
 
@@ -458,17 +456,6 @@ Then rebuild nginx:
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build -d nginx
 ```
-
----
-
-### Issue 3 — "wsl: command not found" in Ubuntu terminal
-
-**Cause:** `wsl --shutdown` is a PowerShell/Windows command. Running it inside the
-Ubuntu terminal doesn't work.
-
-**Fix:** Type `exit` to leave Ubuntu and return to PowerShell, then run the command there.
-
----
 
 ### General troubleshooting tips
 

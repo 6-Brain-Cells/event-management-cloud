@@ -37,8 +37,8 @@ show_help() {
 }
 
 get_compose_files() {
-  local env=$1
-  local monitor=$2
+  local env="$1"
+  local monitor="$2"
   local files="$BASE -f docker-compose.${env}.yml"
   [ "$monitor" = "--monitor" ] && files="$files $MONITORING"
   echo "$files"
@@ -46,49 +46,60 @@ get_compose_files() {
 
 case "$1" in
   up)
-    ENV=${2:-dev}
-    FILES=$(get_compose_files $ENV $3)
+    ENV="${2:-dev}"
+    FILES=$(get_compose_files "$ENV" "${3:-}")
     echo "▶  Starting $ENV environment..."
-    $COMPOSE $FILES up --build -d
+    
+    # shellcheck disable=SC2086
+    if [ "$ENV" = "prod" ]; then
+      $COMPOSE -p "event-$ENV" $FILES up --build -d --scale user-service=2 --scale event-service=2
+    else
+      $COMPOSE -p "event-$ENV" $FILES up --build -d
+    fi
+    
     echo ""
     echo "✅  $ENV environment running:"
-    case $ENV in
+    case "$ENV" in
       dev)  echo "   Frontend:    http://localhost:8080" ;;
       test) echo "   Frontend:    http://localhost:8081" ;;
       prod) echo "   Frontend:    http://localhost:8082" ;;
     esac
-    [ "$3" = "--monitor" ] && echo "   Prometheus:  http://localhost:9090" && echo "   Grafana:     http://localhost:3000 (admin/admin)"
+    [ "${3:-}" = "--monitor" ] && echo "   Prometheus:  http://localhost:9090" && echo "   Grafana:     http://localhost:3000 (admin/admin)" && echo "   Loki:        http://localhost:3100"
     ;;
 
   down)
-    ENV=${2:-dev}
-    FILES=$(get_compose_files $ENV $3)
+    ENV="${2:-dev}"
+    FILES=$(get_compose_files "$ENV" "${3:-}")
     echo "⏹  Stopping $ENV environment..."
-    $COMPOSE $FILES down
+    # shellcheck disable=SC2086
+    $COMPOSE -p "event-$ENV" $FILES down
     ;;
 
   build)
-    ENV=${2:-dev}
-    FILES=$(get_compose_files $ENV)
+    ENV="${2:-dev}"
+    FILES=$(get_compose_files "$ENV" "${3:-}")
     echo "🔨  Building $ENV images..."
-    $COMPOSE $FILES build
+    # shellcheck disable=SC2086
+    $COMPOSE -p "event-$ENV" $FILES build
     ;;
 
   logs)
-    ENV=${2:-dev}
-    FILES=$(get_compose_files $ENV)
-    $COMPOSE $FILES logs -f
+    ENV="${2:-dev}"
+    FILES=$(get_compose_files "$ENV" "${3:-}")
+    # shellcheck disable=SC2086
+    $COMPOSE -p "event-$ENV" $FILES logs -f
     ;;
 
   test)
     echo "🧪  Running integration tests..."
-    $COMPOSE $BASE -f docker-compose.test.yml up --build --abort-on-container-exit --exit-code-from test-runner
+    # shellcheck disable=SC2086
+    $COMPOSE -p "event-test" $BASE -f docker-compose.test.yml up --build --abort-on-container-exit --exit-code-from test-runner
     ;;
 
   k8s-up)
     echo "☸️  Deploying to Minikube..."
     # Build images inside Minikube's Docker daemon
-    eval $(minikube docker-env)
+    eval "$(minikube docker-env)"
     docker build -t event-mgmt/user-service:latest ./services/user-service
     docker build -t event-mgmt/event-service:latest ./services/event-service
     docker build -t event-mgmt/registration-service:latest ./services/registration-service
@@ -118,9 +129,12 @@ case "$1" in
 
   clean)
     echo "🧹  Cleaning up all volumes and containers..."
-    $COMPOSE $BASE -f docker-compose.dev.yml down -v --remove-orphans 2>/dev/null || true
-    $COMPOSE $BASE -f docker-compose.test.yml down -v --remove-orphans 2>/dev/null || true
-    $COMPOSE $BASE -f docker-compose.prod.yml down -v --remove-orphans 2>/dev/null || true
+    # shellcheck disable=SC2086
+    $COMPOSE -p "event-dev" $BASE -f docker-compose.dev.yml down -v --remove-orphans 2>/dev/null || true
+    # shellcheck disable=SC2086
+    $COMPOSE -p "event-test" $BASE -f docker-compose.test.yml down -v --remove-orphans 2>/dev/null || true
+    # shellcheck disable=SC2086
+    $COMPOSE -p "event-prod" $BASE -f docker-compose.prod.yml down -v --remove-orphans 2>/dev/null || true
     echo "✅  Cleaned"
     ;;
 

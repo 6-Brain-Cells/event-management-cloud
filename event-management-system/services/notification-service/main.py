@@ -1,5 +1,6 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from prometheus_fastapi_instrumentator import Instrumentator
 from pydantic import BaseModel
 from typing import Optional
 import psycopg2
@@ -8,9 +9,11 @@ import os
 import redis
 import json
 import threading
+import httpx
 from datetime import datetime
 
 app = FastAPI(title="Notification Service", version="1.0.0")
+WEBHOOK_URL = os.getenv("NOTIFICATION_WEBHOOK_URL", "").strip()
 
 app.add_middleware(
     CORSMiddleware,
@@ -18,6 +21,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+Instrumentator().instrument(app).expose(app, endpoint="/metrics")
 
 def get_db():
     return psycopg2.connect(
@@ -41,6 +45,16 @@ class NotificationCreate(BaseModel):
     title: str
     message: str
     notification_type: str = "info"  # info, reminder, confirmation, cancellation
+
+def deliver_webhook(payload: dict):
+    """Optional outbound delivery channel for user-visible notifications."""
+    if not WEBHOOK_URL:
+        return
+    try:
+        with httpx.Client(timeout=5.0) as client:
+            client.post(WEBHOOK_URL, json=payload)
+    except Exception as e:
+        print(f"[NOTIFY] Webhook delivery failed: {e}")
 
 def save_notification(user_id: int, title: str, message: str, notification_type: str):
     """Save notification to DB"""
@@ -66,6 +80,15 @@ def save_notification(user_id: int, title: str, message: str, notification_type:
         cur.close()
         conn.close()
         print(f"[NOTIFY] Saved notification for user {user_id}: {title}")
+        deliver_webhook(
+            {
+                "user_id": user_id,
+                "title": title,
+                "message": message,
+                "notification_type": notification_type,
+                "delivered_at": datetime.utcnow().isoformat() + "Z",
+            }
+        )
     except Exception as e:
         print(f"[NOTIFY] Error saving notification: {e}")
 
@@ -134,6 +157,10 @@ def startup():
 def health():
     return {"status": "healthy", "service": "notification-service"}
 
+@app.get("/notifications/health")
+def notifications_health():
+    return {"status": "healthy", "service": "notification-service"}
+
 @app.post("/notifications")
 def create_notification(notif: NotificationCreate):
     """Manually create a notification (e.g., reminders triggered by organizers)"""
@@ -147,6 +174,15 @@ def create_notification(notif: NotificationCreate):
         new_notif = dict(cur.fetchone())
         new_notif["created_at"] = str(new_notif["created_at"])
         conn.commit()
+        deliver_webhook(
+            {
+                "user_id": notif.user_id,
+                "title": notif.title,
+                "message": notif.message,
+                "notification_type": notif.notification_type,
+                "delivered_at": datetime.utcnow().isoformat() + "Z",
+            }
+        )
         return {"message": "Notification sent", "notification": new_notif}
     finally:
         cur.close()
@@ -195,6 +231,15 @@ def broadcast(user_ids: list[int], title: str, message: str):
             cur.execute(
                 "INSERT INTO notifications (user_id, title, message, notification_type) VALUES (%s, %s, %s, 'info')",
                 (uid, title, message)
+            )
+            deliver_webhook(
+                {
+                    "user_id": uid,
+                    "title": title,
+                    "message": message,
+                    "notification_type": "info",
+                    "delivered_at": datetime.utcnow().isoformat() + "Z",
+                }
             )
         conn.commit()
         return {"message": f"Broadcast sent to {len(user_ids)} users"}

@@ -1,5 +1,6 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from prometheus_fastapi_instrumentator import Instrumentator
 from pydantic import BaseModel
 from typing import Optional, List
 import psycopg2
@@ -17,6 +18,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+Instrumentator().instrument(app).expose(app, endpoint="/metrics")
 
 def get_db():
     return psycopg2.connect(
@@ -83,6 +85,10 @@ def startup():
 
 @app.get("/health")
 def health():
+    return {"status": "healthy", "service": "event-service"}
+
+@app.get("/events/health")
+def events_health():
     return {"status": "healthy", "service": "event-service"}
 
 @app.post("/events")
@@ -197,6 +203,27 @@ def increment_registration(event_id: int):
         row = cur.fetchone()
         if not row:
             raise HTTPException(status_code=409, detail="Event full or not found")
+        conn.commit()
+        return dict(row)
+    finally:
+        cur.close()
+        conn.close()
+
+@app.patch("/events/{event_id}/decrement-registration")
+def decrement_registration(event_id: int):
+    """Compensating action used when registration creation fails after increment."""
+    conn = get_db()
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            UPDATE events
+            SET registered_count = GREATEST(registered_count - 1, 0)
+            WHERE id=%s
+            RETURNING id, registered_count, max_capacity
+        """, (event_id,))
+        row = cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Event not found")
         conn.commit()
         return dict(row)
     finally:
