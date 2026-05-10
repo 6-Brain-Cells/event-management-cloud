@@ -27,7 +27,8 @@ Built with Docker, Docker Compose (dev / test / prod environments), and Kubernet
                         │   :5432    │    │   :6379    │
                         └────────────┘    └────────────┘
 
-         Monitoring (bonus): Prometheus :9090 · Grafana :3000 · Node Exporter :9100
+         Monitoring: Prometheus :9090 · Grafana :3000 · Node Exporter :9100
+         Logging:    Promtail (log agent) → Loki :3100 → Grafana Explore
 ```
 
 ### Services
@@ -41,6 +42,10 @@ Built with Docker, Docker Compose (dev / test / prod environments), and Kubernet
 | **nginx** | 80 | API gateway + serves frontend dashboard |
 | **postgres** | 5432 | Primary relational database |
 | **redis** | 6379 | Cache + async message broker (Pub/Sub) |
+| **prometheus** | 9090 | Metrics scraping and storage (bonus) |
+| **loki** | 3100 | Centralized log storage (bonus) |
+| **promtail** | 9080 | Log collection agent — ships container logs to Loki (bonus) |
+| **grafana** | 3000 | Unified metrics + logs dashboard (bonus) |
 
 ---
 
@@ -53,7 +58,7 @@ event-management-system/
 ├── docker-compose.dev.yml           ← development overrides
 ├── docker-compose.test.yml          ← testing overrides + test-runner
 ├── docker-compose.prod.yml          ← production overrides
-├── docker-compose.monitoring.yml    ← bonus: Prometheus + Grafana
+├── docker-compose.monitoring.yml    ← bonus: Prometheus + Grafana + Loki + Promtail
 ├── services/
 │   ├── user-service/
 │   │   ├── main.py
@@ -69,9 +74,15 @@ event-management-system/
 ├── k8s/
 │   ├── configmaps/config.yaml
 │   ├── deployments/deployments.yaml
-│   └── services/services.yaml
+│   ├── services/services.yaml
+│   └── monitoring/
+│       ├── loki-deployment.yaml     ← Loki log store (Deployment + Service)
+│       └── promtail-daemonset.yaml  ← Promtail log agent (DaemonSet + RBAC)
 ├── monitoring/
-│   └── prometheus.yml
+│   ├── prometheus.yml               ← Prometheus scrape config
+│   ├── loki-config.yml              ← Loki server config (filesystem storage)
+│   ├── promtail-config.yml          ← Promtail Docker discovery pipeline
+│   └── grafana-datasources.yml      ← Grafana auto-provisioning (Prometheus + Loki)
 └── tests/
     └── test_api.py
 ```
@@ -87,8 +98,12 @@ event-management-system/
 | `postgres:16-alpine` | Primary database |
 | `redis:7-alpine` | Cache + message broker |
 | `prom/prometheus` | Metrics collection (bonus) |
-| `grafana/grafana` | Dashboards (bonus) |
 | `prom/node-exporter` | Host metrics (bonus) |
+| `prometheuscommunity/postgres-exporter` | PostgreSQL metrics (bonus) |
+| `oliver006/redis_exporter` | Redis metrics (bonus) |
+| `grafana/loki` | Centralized log storage (bonus) |
+| `grafana/promtail` | Log collection agent — reads Docker container logs (bonus) |
+| `grafana/grafana` | Unified metrics + logs dashboards (bonus) |
 
 All service images use multi-stage builds to minimize final image size (~80–100 MB each).
 
@@ -343,12 +358,88 @@ Add the full monitoring stack to any environment:
 
 # Prometheus:  http://localhost:9090
 # Grafana:     http://localhost:3000  (login: admin / admin)
+# Loki:        http://localhost:3100  (log storage API)
+# Promtail:    http://localhost:9080  (shipper health)
 ```
 
-**Grafana quick setup:**
-1. Add data source: Prometheus → URL: `http://prometheus:9090`
-2. Import dashboard **1860** — Node Exporter Full (host metrics)
-3. Import dashboard **9628** — PostgreSQL metrics
+**Grafana is auto-configured** — both Prometheus and Loki data sources are provisioned automatically on first start. No manual setup required.
+
+**Grafana quick setup for dashboards:**
+1. Go to **Dashboards → Import** → ID `1860` — Node Exporter Full (host metrics)
+2. Go to **Dashboards → Import** → ID `9628` — PostgreSQL metrics
+
+---
+
+## Centralized Logging (Bonus)
+
+All container logs are automatically collected by **Promtail** and stored in **Loki**.
+You can query them from the **Grafana Explore** tab using **LogQL**.
+
+### Start the logging stack
+
+```bash
+./manage.sh up dev --monitor
+# Promtail discovers all containers on event-network automatically
+# No code changes needed in any service
+```
+
+### Query logs in Grafana
+
+1. Open **http://localhost:3000** (admin / admin)
+2. Go to **Explore** (compass icon in left sidebar)
+3. Select **Loki** as the data source
+4. Use **LogQL** to query:
+
+```logql
+# All logs from the user service
+{service="user-service"}
+
+# All logs from all microservices
+{service=~"user-service|event-service|registration-service|notification-service"}
+
+# Filter for errors only
+{service="registration-service"} |= "ERROR"
+
+# Nginx access logs, 5xx errors only
+{service="nginx"} | status >= 500
+
+# Count log lines per service over time (rate)
+sum by (service) (rate({service=~".+"}[5m]))
+```
+
+### Log pipeline
+
+```
+Docker container stdout/stderr
+        │
+        ▼
+   Promtail (:9080)          ← discovers containers via /var/run/docker.sock
+   labels: service, container_name, stream
+        │  HTTP push
+        ▼
+   Loki (:3100)              ← stores logs on filesystem (/loki)
+        │  LogQL
+        ▼
+   Grafana (:3000)           ← Explore → Loki data source
+```
+
+### Kubernetes logging
+
+When deployed via Minikube, Promtail runs as a **DaemonSet** (one pod per node):
+
+```bash
+./manage.sh k8s-up
+
+# Access Grafana for logs:
+kubectl port-forward svc/grafana 3000:3000
+
+# Check Promtail is shipping logs:
+kubectl logs daemonset/promtail
+
+# Check Loki health:
+kubectl port-forward svc/loki 3100:3100
+curl http://localhost:3100/ready
+```
 
 ---
 

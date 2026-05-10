@@ -1,0 +1,95 @@
+server:
+  http_listen_port: 9080
+  grpc_listen_port: 0
+  log_level: info
+
+positions:
+  # Promtail tracks read positions here so it never re-ships old logs on restart
+  filename: /tmp/positions.yaml
+
+clients:
+  - url: http://loki:3100/loki/api/v1/push
+
+scrape_configs:
+  # ── Docker container log collection ─────────────────────────────────────────
+  - job_name: docker-containers
+    docker_sd_configs:
+      - host: unix:///var/run/docker.sock
+        refresh_interval: 5s
+        filters:
+          # Only collect logs from our event-network containers
+          - name: network
+            values: ["event-network"]
+
+    relabel_configs:
+      # Use the container name as the "container" label (strip leading /)
+      - source_labels: [__meta_docker_container_name]
+        regex: '/(.*)'
+        target_label: container_name
+
+      # Use the docker-compose service name as the "service" label
+      - source_labels: [__meta_docker_container_label_com_docker_compose_service]
+        target_label: service
+
+      # Use the docker-compose project name
+      - source_labels: [__meta_docker_container_label_com_docker_compose_project]
+        target_label: compose_project
+
+      # Keep only containers that have a service label
+      - source_labels: [service]
+        action: drop
+        regex: ''
+
+      # Stream label (stdout vs stderr)
+      - source_labels: [__meta_docker_container_log_stream]
+        target_label: stream
+
+    pipeline_stages:
+      # Parse log lines that are valid JSON (FastAPI/uvicorn JSON logs)
+      - json:
+          expressions:
+            level: level
+            msg: msg
+            time: time
+          drop_malformed: true  # Keep raw lines that are not JSON
+
+      # Map the "level" field to a Loki label for easy filtering
+      - labels:
+          level: ""
+
+      # Normalize timestamps when present
+      - timestamp:
+          source: time
+          format: RFC3339Nano
+          fallback_formats:
+            - RFC3339
+            - "2006-01-02T15:04:05"
+          action_on_failure: fudge
+
+  # ── Nginx access log collection ──────────────────────────────────────────────
+  - job_name: nginx-access
+    docker_sd_configs:
+      - host: unix:///var/run/docker.sock
+        refresh_interval: 5s
+        filters:
+          - name: label
+            values: ["com.docker.compose.service=nginx"]
+
+    relabel_configs:
+      - source_labels: [__meta_docker_container_name]
+        regex: '/(.*)'
+        target_label: container_name
+      - replacement: nginx
+        target_label: service
+      - replacement: access
+        target_label: log_type
+
+    pipeline_stages:
+      # Parse nginx access log format:
+      # 172.18.0.1 - - [10/May/2026:12:00:00 +0000] "GET /api/users HTTP/1.1" 200 512
+      - regex:
+          expression: '^(?P<remote_addr>\S+) - (?P<remote_user>\S+) \[(?P<time_local>[^\]]+)\] "(?P<method>\S+) (?P<path>\S+) (?P<protocol>[^"]+)" (?P<status>\d{3}) (?P<bytes_sent>\d+)'
+
+      - labels:
+          method: ""
+          status: ""

@@ -134,6 +134,24 @@ def register(reg: RegistrationCreate):
         cur.close()
         conn.close()
 
+@app.get("/registrations")
+def list_registrations():
+    conn = get_db()
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT * FROM registrations ORDER BY registration_date DESC LIMIT 100")
+        regs = []
+        for row in cur.fetchall():
+            r = dict(row)
+            for k, v in r.items():
+                if isinstance(v, datetime):
+                    r[k] = str(v)
+            regs.append(r)
+        return {"registrations": regs, "total": len(regs)}
+    finally:
+        cur.close()
+        conn.close()
+
 @app.get("/registrations/{registration_id}")
 def get_registration(registration_id: int):
     conn = get_db()

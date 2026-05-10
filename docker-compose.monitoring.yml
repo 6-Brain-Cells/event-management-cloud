@@ -1,16 +1,21 @@
 version: "3.9"
 
 # ─────────────────────────────────────────────────────────────────
-# MONITORING STACK (Bonus)
+# MONITORING + LOGGING STACK (Bonus)
 # Add to any environment:
 #   docker-compose -f docker-compose.yml -f docker-compose.dev.yml \
 #                  -f docker-compose.monitoring.yml up
 # Access:
 #   Prometheus: http://localhost:9090
-#   Grafana:    http://localhost:3000  (admin / admin)
+#   Loki:       http://localhost:3100   (internal log store)
+#   Promtail:   http://localhost:9080   (log shipper health)
+#   Grafana:    http://localhost:3000   (admin / admin)
+#     → Add Loki data source: http://loki:3100
+#     → Explore > Loki > {service="user-service"}
 # ─────────────────────────────────────────────────────────────────
 
 services:
+  # ── Metrics ───────────────────────────────────────────────────────────────
   prometheus:
     image: prom/prometheus:v2.48.0
     volumes:
@@ -25,21 +30,6 @@ services:
       - "9090:9090"
     networks:
       - event-network
-    restart: unless-stopped
-
-  grafana:
-    image: grafana/grafana:10.2.0
-    environment:
-      GF_SECURITY_ADMIN_PASSWORD: admin
-      GF_USERS_ALLOW_SIGN_UP: "false"
-    volumes:
-      - grafana_data:/var/lib/grafana
-    ports:
-      - "3000:3000"
-    networks:
-      - event-network
-    depends_on:
-      - prometheus
     restart: unless-stopped
 
   node-exporter:
@@ -80,6 +70,63 @@ services:
       - event-network
     restart: unless-stopped
 
+  # ── Centralized Logging (Loki Stack) ──────────────────────────────────────
+  loki:
+    image: grafana/loki:2.9.3
+    ports:
+      - "3100:3100"
+    volumes:
+      - ./monitoring/loki-config.yml:/etc/loki/local-config.yaml:ro
+      - loki_data:/loki
+    command: -config.file=/etc/loki/local-config.yaml
+    networks:
+      - event-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:3100/ready || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  promtail:
+    image: grafana/promtail:2.9.3
+    ports:
+      - "9080:9080"
+    volumes:
+      - ./monitoring/promtail-config.yml:/etc/promtail/config.yml:ro
+      # Docker socket — lets Promtail discover running containers and their labels
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      # Container log files — Promtail reads these directly
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+    command: -config.file=/etc/promtail/config.yml
+    networks:
+      - event-network
+    depends_on:
+      loki:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ── Grafana (unified metrics + logs dashboard) ─────────────────────────────
+  grafana:
+    image: grafana/grafana:10.2.0
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      # Auto-provision Loki as a data source on first start
+      GF_DATASOURCE_PROVISIONING: "true"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana-datasources.yml:/etc/grafana/provisioning/datasources/datasources.yml:ro
+    ports:
+      - "3000:3000"
+    networks:
+      - event-network
+    depends_on:
+      - prometheus
+      - loki
+    restart: unless-stopped
+
 volumes:
   prometheus_data:
   grafana_data:
+  loki_data:

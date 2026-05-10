@@ -1,0 +1,28 @@
+# Grafana auto-provisioning — data sources
+# Mounted into the container at startup so users don't need to
+# manually add Prometheus or Loki via the UI.
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: true
+    jsonData:
+      timeInterval: "15s"
+
+  - name: Loki
+    type: loki
+    access: proxy
+    url: http://loki:3100
+    isDefault: false
+    editable: true
+    jsonData:
+      maxLines: 1000
+      derivedFields:
+        # Link log lines that contain a request_id to a Tempo trace (optional future)
+        - name: "request_id"
+          matcherRegex: "request_id=([\\w-]+)"
+          url: ""

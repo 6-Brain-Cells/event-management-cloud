@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>EventHub – Notifications</title>
+  <link rel="stylesheet" href="/assets/style.css">
+</head>
+<body>
+  <main class="main">
+    
+    <section class="card">
+      <div class="card-header">
+        <h2>My Inbox</h2>
+        <button id="refresh-notifs" class="secondary" style="margin: 0; padding: 0.5rem 1rem;">↻ Refresh</button>
+      </div>
+      
+      <div id="notifs-container">
+        <!-- Populated via JS -->
+        <div class="empty-state">Loading your notifications...</div>
+      </div>
+    </section>
+
+  </main>
+
+  <footer>© 2026 EventHub Cloud-Native Platform</footer>
+
+  <script type="module">
+    import { apiCall, renderNavbar, getActiveUserId } from './assets/api.js';
+
+    // Inject Navigation
+    renderNavbar('notifications');
+
+    const notifsContainer = document.getElementById('notifs-container');
+    const refreshBtn = document.getElementById('refresh-notifs');
+
+    async function loadNotifications() {
+      const userId = getActiveUserId();
+      if (!userId) {
+        notifsContainer.innerHTML = '<div class="empty-state" style="color: var(--warning);">Please select an Active User from the navigation bar.</div>';
+        return;
+      }
+
+      try {
+        const data = await apiCall(`/api/notifications/user/${userId}`);
+        const notifs = data.notifications || [];
+        
+        notifsContainer.innerHTML = '';
+        
+        if (notifs.length === 0) {
+          notifsContainer.innerHTML = '<div class="empty-state">Your inbox is empty.</div>';
+          return;
+        }
+
+        notifs.forEach(n => {
+          const item = document.createElement('div');
+          item.className = 'notification-item';
+          
+          item.innerHTML = `
+            <div class="notif-header">
+              <span class="notif-type">${n.notification_type}</span>
+              <span class="notif-time">${new Date(n.created_at).toLocaleString()}</span>
+            </div>
+            <div class="notif-message">${n.message}</div>
+          `;
+          notifsContainer.appendChild(item);
+        });
+
+      } catch (err) {
+        console.error(err);
+        notifsContainer.innerHTML = `<div class="empty-state" style="color: var(--danger);">Error: ${err.message}</div>`;
+      }
+    }
+
+    refreshBtn.addEventListener('click', loadNotifications);
+    
+    // Initial load
+    setTimeout(loadNotifications, 100);
+  </script>
+</body>
+</html>

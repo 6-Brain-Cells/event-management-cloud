@@ -1,4 +1,5 @@
 FROM nginx:1.25-alpine
 COPY nginx.conf /etc/nginx/nginx.conf
-COPY index.html /usr/share/nginx/html/index.html
+COPY assets /usr/share/nginx/html/assets
+COPY *.html /usr/share/nginx/html/
 EXPOSE 80

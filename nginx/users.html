@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>EventHub – Users</title>
+  <link rel="stylesheet" href="/assets/style.css">
+</head>
+<body>
+  <main class="main">
+    <div style="display: grid; grid-template-columns: 1fr; gap: 2rem;">
+      <!-- Registration Form -->
+      <section class="card">
+        <div class="card-header">
+          <h2>Register New User</h2>
+        </div>
+        <form id="register-form" style="display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem;">
+          <div class="form-group">
+            <label for="username">Username</label>
+            <input type="text" id="username" name="username" required placeholder="johndoe">
+          </div>
+          <div class="form-group">
+            <label for="email">Email Address</label>
+            <input type="email" id="email" name="email" required placeholder="john@example.com">
+          </div>
+          <div class="form-group">
+            <label for="full_name">Full Name</label>
+            <input type="text" id="full_name" name="full_name" required placeholder="John Doe">
+          </div>
+          <div class="form-group">
+            <label for="password">Password</label>
+            <input type="password" id="password" name="password" required placeholder="••••••••">
+          </div>
+          <div style="grid-column: 1 / -1; display: flex; justify-content: space-between; align-items: center; margin-top: 1rem;">
+            <div id="register-status" style="font-size: 0.9rem; font-weight: 500;"></div>
+            <button type="submit">Create Account</button>
+          </div>
+        </form>
+      </section>
+
+      <!-- Users List -->
+      <section class="card">
+        <div class="card-header">
+          <h2>Registered Users</h2>
+          <button id="refresh-users" class="secondary" style="margin: 0; padding: 0.5rem 1rem;">↻ Refresh</button>
+        </div>
+        <div id="users-grid" class="grid-container">
+          <!-- Populated via JS -->
+          <div class="empty-state">Loading users...</div>
+        </div>
+      </section>
+    </div>
+  </main>
+
+  <footer>© 2026 EventHub Cloud-Native Platform</footer>
+
+  <script type="module">
+    import { apiCall, renderNavbar } from './assets/api.js';
+
+    // Inject Navigation
+    renderNavbar('users');
+
+    const registerForm = document.getElementById('register-form');
+    const registerStatus = document.getElementById('register-status');
+    const usersGrid = document.getElementById('users-grid');
+    const refreshBtn = document.getElementById('refresh-users');
+
+    async function loadUsers() {
+      try {
+        const data = await apiCall('/api/users');
+        const users = data.users || [];
+        
+        usersGrid.innerHTML = '';
+        
+        if (users.length === 0) {
+          usersGrid.innerHTML = '<div class="empty-state">No users found. Create one above!</div>';
+          return;
+        }
+
+        users.forEach(user => {
+          const card = document.createElement('div');
+          card.className = 'data-card';
+          card.innerHTML = `
+            <div style="display: flex; justify-content: space-between; align-items: flex-start;">
+              <h3>${user.full_name}</h3>
+              <span class="data-badge primary">ID: ${user.id}</span>
+            </div>
+            <p style="margin: 0;"><strong>@${user.username}</strong></p>
+            <p style="margin: 0; font-size: 0.9rem; color: var(--muted);">${user.email}</p>
+          `;
+          usersGrid.appendChild(card);
+        });
+      } catch (err) {
+        console.error(err);
+        usersGrid.innerHTML = `<div class="empty-state" style="color: var(--danger);">Error: ${err.message}</div>`;
+      }
+    }
+
+    registerForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      registerStatus.textContent = 'Registering...';
+      registerStatus.style.color = 'var(--muted)';
+      
+      const formData = new FormData(registerForm);
+      const data = Object.fromEntries(formData.entries());
+      
+      try {
+        await apiCall('/api/users/register', 'POST', data);
+        registerStatus.textContent = 'User registered successfully!';
+        registerStatus.style.color = 'var(--success)';
+        registerForm.reset();
+        loadUsers();
+        // Force refresh of the navbar user selector
+        setTimeout(() => window.location.reload(), 1500);
+      } catch (err) {
+        registerStatus.textContent = 'Error: ' + err.message;
+        registerStatus.style.color = 'var(--danger)';
+      }
+    });
+
+    refreshBtn.addEventListener('click', loadUsers);
+    
+    // Initial load
+    loadUsers();
+  </script>
+</body>
+</html>

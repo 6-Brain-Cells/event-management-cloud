@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>EventHub – Events</title>
+  <link rel="stylesheet" href="/assets/style.css">
+</head>
+<body>
+  <main class="main">
+    
+    <!-- Create Event -->
+    <section class="card">
+      <div class="card-header">
+        <h2>Host New Event</h2>
+      </div>
+      <form id="event-form" style="display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem;">
+        <div class="form-group" style="grid-column: 1 / -1;">
+          <label for="title">Event Title</label>
+          <input type="text" id="title" name="title" required placeholder="Annual Tech Conference 2026">
+        </div>
+        
+        <div class="form-group" style="grid-column: 1 / -1;">
+          <label for="description">Description</label>
+          <textarea id="description" name="description" rows="3" placeholder="Join us for an amazing event..."></textarea>
+        </div>
+        
+        <div class="form-group">
+          <label for="event_type">Event Type</label>
+          <select id="event_type" name="event_type">
+            <option value="conference">Conference</option>
+            <option value="workshop">Workshop</option>
+            <option value="seminar">Seminar</option>
+          </select>
+        </div>
+        
+        <div class="form-group">
+          <label for="location">Location</label>
+          <input type="text" id="location" name="location" placeholder="Virtual or Physical Address">
+        </div>
+
+        <div class="form-group">
+          <label for="start_date">Start Date & Time</label>
+          <input type="datetime-local" id="start_date" name="start_date" required>
+        </div>
+        
+        <div class="form-group">
+          <label for="end_date">End Date & Time</label>
+          <input type="datetime-local" id="end_date" name="end_date" required>
+        </div>
+        
+        <div class="form-group">
+          <label for="max_capacity">Max Capacity</label>
+          <input type="number" id="max_capacity" name="max_capacity" value="100" min="1">
+        </div>
+        
+        <div class="form-group">
+          <label for="ticket_price">Ticket Price ($)</label>
+          <input type="number" id="ticket_price" name="ticket_price" step="0.01" value="0.00" min="0">
+        </div>
+        
+        <div style="grid-column: 1 / -1; display: flex; justify-content: space-between; align-items: center; margin-top: 1rem;">
+          <div id="event-status" style="font-size: 0.9rem; font-weight: 500;"></div>
+          <button type="submit">Publish Event</button>
+        </div>
+      </form>
+    </section>
+
+    <!-- Events List -->
+    <section class="card">
+      <div class="card-header">
+        <h2>Upcoming Events</h2>
+        <button id="refresh-events" class="secondary" style="margin: 0; padding: 0.5rem 1rem;">↻ Refresh</button>
+      </div>
+      <div id="register-status" style="margin-bottom: 1rem; text-align: center; font-weight: bold;"></div>
+      <div id="events-grid" class="grid-container">
+        <!-- Populated via JS -->
+        <div class="empty-state">Loading events...</div>
+      </div>
+    </section>
+
+  </main>
+
+  <footer>© 2026 EventHub Cloud-Native Platform</footer>
+
+  <script type="module">
+    import { apiCall, renderNavbar, getActiveUserId } from './assets/api.js';
+
+    // Inject Navigation
+    renderNavbar('events');
+
+    const eventForm = document.getElementById('event-form');
+    const eventStatus = document.getElementById('event-status');
+    const eventsGrid = document.getElementById('events-grid');
+    const refreshBtn = document.getElementById('refresh-events');
+    const registerStatus = document.getElementById('register-status');
+
+    async function loadEvents() {
+      try {
+        const data = await apiCall('/api/events');
+        const events = data.events || [];
+        
+        eventsGrid.innerHTML = '';
+        
+        if (events.length === 0) {
+          eventsGrid.innerHTML = '<div class="empty-state">No events available right now.</div>';
+          return;
+        }
+
+        events.forEach(event => {
+          const card = document.createElement('div');
+          card.className = 'data-card';
+          
+          const startDate = new Date(event.start_date).toLocaleString(undefined, {
+            month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'
+          });
+          const endDate = new Date(event.end_date).toLocaleString(undefined, {
+            hour: '2-digit', minute: '2-digit'
+          });
+
+          card.innerHTML = `
+            <div style="display: flex; justify-content: space-between; align-items: flex-start;">
+              <span class="data-badge primary">${event.event_type}</span>
+              <span class="data-badge" style="background: rgba(255,255,255,0.05); border: 1px solid var(--card-border);">$${event.ticket_price}</span>
+            </div>
+            <h3 style="margin-top: 0.5rem; margin-bottom: 0;">${event.title}</h3>
+            <p style="font-size: 0.85rem; margin: 0; color: var(--muted);">
+              📍 ${event.location || 'TBA'} <br>
+              🕒 ${startDate} - ${endDate}
+            </p>
+            <p style="font-size: 0.9rem; margin-top: 0.5rem; flex: 1;">${event.description || ''}</p>
+            
+            <button class="register-btn" data-id="${event.id}" data-price="${event.ticket_price}" style="width: 100%; margin-top: 1rem; background: var(--success);">
+              Register Now
+            </button>
+          `;
+          eventsGrid.appendChild(card);
+        });
+
+        // Add event listeners to register buttons
+        document.querySelectorAll('.register-btn').forEach(btn => {
+          btn.addEventListener('click', handleRegister);
+        });
+
+      } catch (err) {
+        console.error(err);
+        eventsGrid.innerHTML = `<div class="empty-state" style="color: var(--danger);">Error: ${err.message}</div>`;
+      }
+    }
+
+    async function handleRegister(e) {
+      const eventId = e.target.getAttribute('data-id');
+      const price = parseFloat(e.target.getAttribute('data-price') || 0);
+      const userId = getActiveUserId();
+
+      if (!userId) {
+        registerStatus.textContent = 'Please select an Active User from the top navigation bar first.';
+        registerStatus.style.color = 'var(--warning)';
+        return;
+      }
+
+      const paymentMethod = price > 0 ? 'credit_card' : 'free';
+      const originalText = e.target.textContent;
+      e.target.textContent = 'Processing...';
+      e.target.disabled = true;
+
+      try {
+        await apiCall('/api/registrations', 'POST', {
+          user_id: parseInt(userId),
+          event_id: parseInt(eventId),
+          payment_method: paymentMethod
+        });
+        registerStatus.textContent = 'Successfully registered for the event!';
+        registerStatus.style.color = 'var(--success)';
+        e.target.textContent = 'Registered ✅';
+        e.target.style.background = 'rgba(255,255,255,0.1)';
+      } catch (err) {
+        registerStatus.textContent = 'Failed to register: ' + err.message;
+        registerStatus.style.color = 'var(--danger)';
+        e.target.textContent = originalText;
+        e.target.disabled = false;
+      }
+
+      setTimeout(() => { registerStatus.textContent = ''; }, 5000);
+    }
+
+    eventForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      
+      const userId = getActiveUserId();
+      if (!userId) {
+        eventStatus.textContent = 'Please select an Active User first.';
+        eventStatus.style.color = 'var(--warning)';
+        return;
+      }
+
+      eventStatus.textContent = 'Publishing event...';
+      eventStatus.style.color = 'var(--muted)';
+      
+      const formData = new FormData(eventForm);
+      const data = Object.fromEntries(formData.entries());
+      
+      data.max_capacity = parseInt(data.max_capacity);
+      data.ticket_price = parseFloat(data.ticket_price);
+      data.organizer_id = parseInt(userId); // Use global active user
+      
+      data.start_date = data.start_date.replace('T', ' ') + ':00';
+      data.end_date = data.end_date.replace('T', ' ') + ':00';
+      
+      try {
+        await apiCall('/api/events', 'POST', data);
+        eventStatus.textContent = 'Event published successfully!';
+        eventStatus.style.color = 'var(--success)';
+        eventForm.reset();
+        loadEvents();
+      } catch (err) {
+        eventStatus.textContent = 'Error: ' + err.message;
+        eventStatus.style.color = 'var(--danger)';
+      }
+    });
+
+    refreshBtn.addEventListener('click', loadEvents);
+    
+    // Initial load
+    loadEvents();
+  </script>
+</body>
+</html>

@@ -8,7 +8,7 @@ set -e
 
 COMPOSE="docker compose"
 BASE="-f docker-compose.yml"
-MONITORING="-f docker-compose.monitoring.yml"
+MONITORING="-f docker-compose.monitoring.yml"   # Prometheus + Grafana + Loki + Promtail
 
 show_help() {
   echo ""
@@ -29,7 +29,7 @@ show_help() {
   echo ""
   echo "  Examples:"
   echo "    ./manage.sh up dev               # Start dev (http://localhost:8080)"
-  echo "    ./manage.sh up dev --monitor     # + Prometheus/Grafana"
+  echo "    ./manage.sh up dev --monitor     # + Prometheus, Grafana, Loki, Promtail"
   echo "    ./manage.sh up test              # Start test (http://localhost:8081)"
   echo "    ./manage.sh up prod              # Start prod (http://localhost:8082)"
   echo "    ./manage.sh up dev & ./manage.sh up prod  # Both simultaneously"
@@ -57,7 +57,17 @@ case "$1" in
       test) echo "   Frontend:    http://localhost:8081" ;;
       prod) echo "   Frontend:    http://localhost:8082" ;;
     esac
-    [ "$3" = "--monitor" ] && echo "   Prometheus:  http://localhost:9090" && echo "   Grafana:     http://localhost:3000 (admin/admin)"
+    if [ "$3" = "--monitor" ]; then
+      echo "   Prometheus:  http://localhost:9090"
+      echo "   Loki:        http://localhost:3100"
+      echo "   Promtail:    http://localhost:9080   (shipper health)"
+      echo "   Grafana:     http://localhost:3000   (admin / admin)"
+      echo ""
+      echo "   ┌─ Grafana Quick Start ────────────────────────────────┐"
+      echo "   │ Both Prometheus and Loki are auto-provisioned.       │"
+      echo "   │ Go to Explore → Loki → run: {service=\"user-service\"}│"
+      echo "   └──────────────────────────────────────────────────────┘"
+    fi
     ;;
 
   down)
@@ -94,17 +104,22 @@ case "$1" in
     docker build -t event-mgmt/registration-service:latest ./services/registration-service
     docker build -t event-mgmt/notification-service:latest ./services/notification-service
     docker build -t event-mgmt/nginx:latest ./nginx
-    # Apply manifests
+    # Apply application manifests
     kubectl apply -f k8s/configmaps/
     kubectl apply -f k8s/deployments/
     kubectl apply -f k8s/services/
+    # Apply monitoring + logging manifests (Loki + Promtail)
+    kubectl apply -f k8s/monitoring/
     echo ""
     echo "✅  Deployed to Minikube"
-    echo "   Run: minikube service nginx --url"
+    echo "   App:      minikube service nginx --url"
+    echo "   Logs:     kubectl port-forward svc/loki 3100:3100"
+    echo "   Grafana:  kubectl port-forward svc/grafana 3000:3000"
     ;;
 
   k8s-down)
     echo "☸️  Removing from Minikube..."
+    kubectl delete -f k8s/monitoring/ --ignore-not-found
     kubectl delete -f k8s/services/ --ignore-not-found
     kubectl delete -f k8s/deployments/ --ignore-not-found
     kubectl delete -f k8s/configmaps/ --ignore-not-found

@@ -1,240 +1,45 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>EventHub — Event Management System</title>
-<style>
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { font-family: 'Segoe UI', system-ui, sans-serif; background: #0f1117; color: #e2e8f0; min-height: 100vh; }
-  header { background: #1a1d2e; border-bottom: 1px solid #2d3148; padding: 1rem 2rem; display: flex; align-items: center; gap: 1rem; }
-  header h1 { font-size: 1.5rem; color: #818cf8; }
-  header span { font-size: 0.8rem; background: #312e81; color: #a5b4fc; padding: 2px 8px; border-radius: 999px; }
-  .container { max-width: 1100px; margin: 2rem auto; padding: 0 1rem; }
-  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1rem; margin-bottom: 2rem; }
-  .stat-card { background: #1a1d2e; border: 1px solid #2d3148; border-radius: 12px; padding: 1.2rem; }
-  .stat-card .label { font-size: 0.75rem; color: #94a3b8; margin-bottom: 0.5rem; text-transform: uppercase; letter-spacing: 0.05em; }
-  .stat-card .value { font-size: 2rem; font-weight: 700; color: #818cf8; }
-  .section { background: #1a1d2e; border: 1px solid #2d3148; border-radius: 12px; padding: 1.5rem; margin-bottom: 1.5rem; }
-  .section h2 { font-size: 1rem; color: #94a3b8; margin-bottom: 1rem; display: flex; align-items: center; gap: 0.5rem; }
-  .service-row { display: flex; align-items: center; justify-content: space-between; padding: 0.6rem 0; border-bottom: 1px solid #2d3148; }
-  .service-row:last-child { border-bottom: none; }
-  .badge { padding: 2px 10px; border-radius: 999px; font-size: 0.75rem; font-weight: 600; }
-  .badge.healthy { background: #064e3b; color: #6ee7b7; }
-  .badge.error { background: #7f1d1d; color: #fca5a5; }
-  .badge.checking { background: #1e3a5f; color: #93c5fd; }
-  .btn { background: #4f46e5; color: white; border: none; border-radius: 8px; padding: 0.5rem 1.2rem; cursor: pointer; font-size: 0.85rem; transition: background 0.2s; }
-  .btn:hover { background: #4338ca; }
-  .btn.secondary { background: #1e293b; color: #94a3b8; border: 1px solid #334155; }
-  form input, form select { width: 100%; padding: 0.5rem 0.75rem; margin-bottom: 0.6rem; background: #0f1117; border: 1px solid #334155; border-radius: 8px; color: #e2e8f0; font-size: 0.9rem; }
-  .response-box { background: #0f1117; border: 1px solid #2d3148; border-radius: 8px; padding: 1rem; font-family: monospace; font-size: 0.8rem; color: #86efac; white-space: pre-wrap; max-height: 200px; overflow-y: auto; margin-top: 1rem; }
-  .tabs { display: flex; gap: 0.5rem; margin-bottom: 1rem; }
-  .tab { padding: 0.4rem 1rem; border-radius: 8px; cursor: pointer; font-size: 0.85rem; background: #0f1117; color: #64748b; border: 1px solid #2d3148; }
-  .tab.active { background: #312e81; color: #a5b4fc; border-color: #4f46e5; }
-  .hidden { display: none; }
-</style>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>EventHub – Dashboard</title>
+  <link rel="stylesheet" href="/assets/style.css">
 </head>
 <body>
-<header>
-  <h1>⚡ EventHub</h1>
-  <span>Event Management System</span>
-  <span id="env-badge">DEV</span>
-</header>
-<div class="container">
-  <!-- Stats -->
-  <div class="grid">
-    <div class="stat-card"><div class="label">Services</div><div class="value" id="svc-count">4</div></div>
-    <div class="stat-card"><div class="label">Healthy</div><div class="value" id="healthy-count" style="color:#34d399">—</div></div>
-    <div class="stat-card"><div class="label">Architecture</div><div class="value" style="font-size:1rem;padding-top:0.5rem">Microservices</div></div>
-    <div class="stat-card"><div class="label">Message Broker</div><div class="value" style="font-size:1rem;padding-top:0.5rem">Redis Pub/Sub</div></div>
-  </div>
-
-  <!-- Service health -->
-  <div class="section">
-    <h2>🟢 Service Health</h2>
-    <div id="health-list"></div>
-    <button class="btn secondary" style="margin-top:1rem" onclick="checkHealth()">Refresh</button>
-  </div>
-
-  <!-- API Tester -->
-  <div class="section">
-    <h2>🔧 API Explorer</h2>
-    <div class="tabs">
-      <div class="tab active" onclick="switchTab('users', event)">Users</div>
-      <div class="tab" onclick="switchTab('events', event)">Events</div>
-      <div class="tab" onclick="switchTab('registrations', event)">Registrations</div>
-      <div class="tab" onclick="switchTab('notifications', event)">Notifications</div>
+  <main class="main">
+    <div class="card" style="text-align: center; padding: 4rem 2rem;">
+      <h2 style="font-size: 2.5rem; margin-bottom: 1rem;">Welcome to EventHub</h2>
+      <p style="font-size: 1.1rem; max-width: 600px; margin: 0 auto; color: var(--muted);">
+        A modern, cloud-native platform for managing conferences, workshops, and seminars.
+        Select your active profile from the top right to get started.
+      </p>
+      
+      <div class="grid-container mt-2">
+        <a href="/events.html" class="data-card" style="text-decoration: none; align-items: center;">
+          <div style="font-size: 2.5rem; margin-bottom: 0.5rem;">📅</div>
+          <h3>Browse Events</h3>
+          <p style="font-size: 0.9rem; text-align: center;">Discover and register for upcoming events with a single click.</p>
+        </a>
+        <a href="/registrations.html" class="data-card" style="text-decoration: none; align-items: center;">
+          <div style="font-size: 2.5rem; margin-bottom: 0.5rem;">🎟️</div>
+          <h3>My Tickets</h3>
+          <p style="font-size: 0.9rem; text-align: center;">View and manage your current event registrations.</p>
+        </a>
+        <a href="/notifications.html" class="data-card" style="text-decoration: none; align-items: center;">
+          <div style="font-size: 2.5rem; margin-bottom: 0.5rem;">🔔</div>
+          <h3>Notifications</h3>
+          <p style="font-size: 0.9rem; text-align: center;">Check your inbox for updates and reminders.</p>
+        </a>
+      </div>
     </div>
+  </main>
 
-    <!-- Users tab -->
-    <div id="tab-users">
-      <form onsubmit="registerUser(event); return false;">
-        <input name="username" placeholder="Username" required>
-        <input name="email" type="email" placeholder="Email" required>
-        <input name="password" type="password" placeholder="Password" required>
-        <input name="full_name" placeholder="Full name" required>
-        <button class="btn" type="submit">Register User</button>
-        <button class="btn secondary" type="button" onclick="listUsers()">List All Users</button>
-      </form>
-      <div class="response-box" id="resp-users">Response will appear here...</div>
-    </div>
+  <footer>© 2026 EventHub Cloud-Native Platform</footer>
 
-    <!-- Events tab -->
-    <div id="tab-events" class="hidden">
-      <form onsubmit="createEventApi(event); return false;">
-        <input name="title" placeholder="Event title" required>
-        <input name="description" placeholder="Description">
-        <select name="event_type"><option>conference</option><option>workshop</option><option>seminar</option></select>
-        <input name="start_date" placeholder="Start date (2025-06-01 09:00:00)" required>
-        <input name="end_date" placeholder="End date (2025-06-01 18:00:00)" required>
-        <input name="location" placeholder="Location">
-        <input name="max_capacity" type="number" placeholder="Max capacity" value="100">
-        <input name="organizer_id" type="number" placeholder="Organizer user ID" value="1">
-        <input name="ticket_price" type="number" placeholder="Ticket price" value="0">
-        <button class="btn" type="submit">Create Event</button>
-        <button class="btn secondary" type="button" onclick="listEvents()">List All Events</button>
-      </form>
-      <div class="response-box" id="resp-events">Response will appear here...</div>
-    </div>
-
-    <!-- Registrations tab -->
-    <div id="tab-registrations" class="hidden">
-      <form onsubmit="createRegistration(event); return false;">
-        <input name="user_id" type="number" placeholder="User ID" required>
-        <input name="event_id" type="number" placeholder="Event ID" required>
-        <select name="payment_method"><option>free</option><option>credit_card</option><option>paypal</option></select>
-        <button class="btn" type="submit">Register for Event</button>
-      </form>
-      <div class="response-box" id="resp-registrations">Response will appear here...</div>
-    </div>
-
-    <!-- Notifications tab -->
-    <div id="tab-notifications" class="hidden">
-      <form onsubmit="getNotifications(event); return false;">
-        <input name="user_id" type="number" placeholder="User ID" required>
-        <button class="btn" type="submit">Get Notifications</button>
-      </form>
-      <div class="response-box" id="resp-notifications">Response will appear here...</div>
-    </div>
-  </div>
-</div>
-
-<script>
-const API = '';  // Nginx proxies /api/* to services
-const SERVICES = [
-  { name: 'User Service', url: 'http://localhost:8001/health', display: ':8001' },
-  { name: 'Event Service', url: 'http://localhost:8002/health', display: ':8002' },
-  { name: 'Registration Service', url: 'http://localhost:8003/health', display: ':8003' },
-  { name: 'Notification Service', url: 'http://localhost:8004/health', display: ':8004' },
-];
-
-async function checkHealth() {
-  const list = document.getElementById('health-list');
-  let healthy = 0;
-  list.innerHTML = '';
-  for (const svc of SERVICES) {
-    const row = document.createElement('div');
-    row.className = 'service-row';
-    row.innerHTML = `<span>${svc.name} <small style="color:#475569">${svc.display}</small></span><span class="badge checking">checking...</span>`;
-    list.appendChild(row);
-    try {
-      const r = await fetch(svc.url);
-      const badge = row.querySelector('.badge');
-      if (r.ok) { badge.textContent = 'healthy'; badge.className = 'badge healthy'; healthy++; }
-      else { badge.textContent = 'error ' + r.status; badge.className = 'badge error'; }
-    } catch (e) {
-      row.querySelector('.badge').textContent = 'unreachable'; row.querySelector('.badge').className = 'badge error';
-    }
-  }
-  document.getElementById('healthy-count').textContent = healthy;
-}
-
-function switchTab(name, e) {
-  document.querySelectorAll('[id^="tab-"]').forEach(t => t.classList.add('hidden'));
-  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-  document.getElementById('tab-' + name).classList.remove('hidden');
-  if (e && e.target && e.target.classList) e.target.classList.add('active');
-  try { localStorage.setItem('activeTab', name); } catch (_) {}
-}
-
-async function apiCall(url, method, body, respId) {
-  const box = document.getElementById(respId);
-  box.textContent = 'Loading...';
-  try {
-    const opts = { method, headers: { 'Content-Type': 'application/json' } };
-    if (body) opts.body = JSON.stringify(body);
-    const r = await fetch(url, opts);
-    const data = await r.json();
-    box.textContent = JSON.stringify(data, null, 2);
-  } catch (e) {
-    box.textContent = 'Error: ' + e.message;
-  }
-}
-
-async function registerUser(e) {
-  e?.preventDefault?.();
-  const f = e.target;
-  await apiCall('/api/users/register', 'POST', {
-    username: f.username.value, email: f.email.value,
-    password: f.password.value, full_name: f.full_name.value
-  }, 'resp-users');
-}
-
-async function listUsers() {
-  await apiCall('/api/users', 'GET', null, 'resp-users');
-}
-
-async function createEventApi(e) {
-  e?.preventDefault?.();
-  const f = e.target;
-  await apiCall('/api/events', 'POST', {
-    title: f.title.value, description: f.description.value,
-    event_type: f.event_type.value, start_date: f.start_date.value,
-    end_date: f.end_date.value, location: f.location.value,
-    max_capacity: parseInt(f.max_capacity.value),
-    organizer_id: parseInt(f.organizer_id.value),
-    ticket_price: parseFloat(f.ticket_price.value)
-  }, 'resp-events');
-}
-
-async function listEvents() {
-  await apiCall('/api/events', 'GET', null, 'resp-events');
-}
-
-async function createRegistration(e) {
-  e?.preventDefault?.();
-  const f = e.target;
-  await apiCall('/api/registrations', 'POST', {
-    user_id: parseInt(f.user_id.value),
-    event_id: parseInt(f.event_id.value),
-    payment_method: f.payment_method.value
-  }, 'resp-registrations');
-}
-
-async function getNotifications(e) {
-  e?.preventDefault?.();
-  const uid = e.target.user_id.value;
-  await apiCall(`/api/notifications/user/${uid}`, 'GET', null, 'resp-notifications');
-}
-
-// Hard-stop browser form navigation, even if inline handlers fail.
-document.querySelectorAll('form').forEach((form) => {
-  form.addEventListener('submit', (e) => e.preventDefault());
-});
-
-// Restore last active tab (helps if the page reloads).
-try {
-  const saved = localStorage.getItem('activeTab');
-  if (saved) {
-    const tabs = Array.from(document.querySelectorAll('.tab'));
-    const idx = ['users', 'events', 'registrations', 'notifications'].indexOf(saved);
-    const tabEl = idx >= 0 ? tabs[idx] : null;
-    if (tabEl) switchTab(saved, { target: tabEl });
-  }
-} catch (_) {}
-
-checkHealth();
-setInterval(checkHealth, 30000);
-</script>
+  <script type="module">
+    import { renderNavbar } from './assets/api.js';
+    renderNavbar('home');
+  </script>
 </body>
 </html>

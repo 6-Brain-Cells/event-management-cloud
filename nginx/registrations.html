@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>EventHub – My Tickets</title>
+  <link rel="stylesheet" href="/assets/style.css">
+</head>
+<body>
+  <main class="main">
+    
+    <!-- Registrations List -->
+    <section class="card">
+      <div class="card-header">
+        <h2>My Tickets</h2>
+        <button id="refresh-regs" class="secondary" style="margin: 0; padding: 0.5rem 1rem;">↻ Refresh</button>
+      </div>
+      
+      <div id="regs-grid" class="grid-container">
+        <!-- Populated via JS -->
+        <div class="empty-state">Loading your tickets...</div>
+      </div>
+    </section>
+
+  </main>
+
+  <footer>© 2026 EventHub Cloud-Native Platform</footer>
+
+  <script type="module">
+    import { apiCall, renderNavbar, getActiveUserId } from './assets/api.js';
+
+    // Inject Navigation
+    renderNavbar('registrations');
+
+    const regsGrid = document.getElementById('regs-grid');
+    const refreshBtn = document.getElementById('refresh-regs');
+
+    async function loadRegistrations() {
+      const userId = getActiveUserId();
+      if (!userId) {
+        regsGrid.innerHTML = '<div class="empty-state" style="color: var(--warning);">Please select an Active User from the navigation bar.</div>';
+        return;
+      }
+
+      try {
+        const data = await apiCall(`/api/registrations/user/${userId}`);
+        const regs = data.registrations || [];
+        
+        regsGrid.innerHTML = '';
+        
+        if (regs.length === 0) {
+          regsGrid.innerHTML = '<div class="empty-state">You have no tickets yet. Head over to Events to register!</div>';
+          return;
+        }
+
+        regs.forEach(r => {
+          const card = document.createElement('div');
+          card.className = 'data-card';
+          
+          let statusColor = 'primary';
+          if (r.status === 'confirmed') statusColor = 'success';
+          if (r.status === 'pending') statusColor = 'warning';
+          if (r.status === 'cancelled') statusColor = 'danger';
+
+          card.innerHTML = `
+            <div style="display: flex; justify-content: space-between; align-items: flex-start;">
+              <span class="data-badge ${statusColor}">${r.status}</span>
+              <span class="data-badge" style="background: rgba(255,255,255,0.05); font-family: monospace;">#${r.id}</span>
+            </div>
+            <h3 style="margin-top: 0.8rem; margin-bottom: 0;">Event ID: ${r.event_id}</h3>
+            <p style="font-size: 0.85rem; margin-top: 0.5rem; color: var(--muted);">
+              Registered on: <br>
+              ${new Date(r.registration_date).toLocaleString()}
+            </p>
+          `;
+          regsGrid.appendChild(card);
+        });
+
+      } catch (err) {
+        console.error(err);
+        regsGrid.innerHTML = `<div class="empty-state" style="color: var(--danger);">Error: ${err.message}</div>`;
+      }
+    }
+
+    refreshBtn.addEventListener('click', loadRegistrations);
+    
+    // Initial load
+    // Need a slight delay to ensure Active User is populated if it was just set
+    setTimeout(loadRegistrations, 100);
+  </script>
+</body>
+</html>
