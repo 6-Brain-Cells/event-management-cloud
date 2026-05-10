@@ -37,12 +37,20 @@ spec:
               command: ["pg_isready", "-U", "postgres"]
             initialDelaySeconds: 10
             periodSeconds: 5
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
           volumeMounts:
             - name: postgres-storage
               mountPath: /var/lib/postgresql/data
       volumes:
         - name: postgres-storage
-          emptyDir: {}    # Use PersistentVolumeClaim in real prod
+          persistentVolumeClaim:
+            claimName: postgres-pvc
 ---
 # ───────────────────────────────────────────────────
 # Redis
@@ -74,6 +82,91 @@ spec:
               command: ["redis-cli", "ping"]
             initialDelaySeconds: 5
             periodSeconds: 5
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "250m"
+              memory: "256Mi"
+          volumeMounts:
+            - name: redis-storage
+              mountPath: /data
+      volumes:
+        - name: redis-storage
+          persistentVolumeClaim:
+            claimName: redis-pvc
+---
+# ───────────────────────────────────────────────────
+# RabbitMQ
+# ───────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rabbitmq
+  labels:
+    app: rabbitmq
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: rabbitmq
+  template:
+    metadata:
+      labels:
+        app: rabbitmq
+    spec:
+      containers:
+        - name: rabbitmq
+          image: rabbitmq:3-management-alpine
+          ports:
+            - containerPort: 5672
+            - containerPort: 15672
+          env:
+            - name: RABBITMQ_DEFAULT_USER
+              value: "guest"
+            - name: RABBITMQ_DEFAULT_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: event-mgmt-secrets
+                  key: RABBITMQ_PASSWORD
+          readinessProbe:
+            exec:
+              command: ["rabbitmq-diagnostics", "ping"]
+            initialDelaySeconds: 20
+            periodSeconds: 30
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+---
+# ───────────────────────────────────────────────────
+# PersistentVolumeClaim for PostgreSQL
+# ───────────────────────────────────────────────────
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres-pvc
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: redis-pvc
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 512Mi
 ---
 # ───────────────────────────────────────────────────
 # User Service
@@ -109,6 +202,11 @@ spec:
                 secretKeyRef:
                   name: event-mgmt-secrets
                   key: DB_PASSWORD
+            - name: RABBITMQ_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: event-mgmt-secrets
+                  key: RABBITMQ_PASSWORD
           readinessProbe:
             httpGet:
               path: /health
@@ -157,6 +255,11 @@ spec:
                 secretKeyRef:
                   name: event-mgmt-secrets
                   key: DB_PASSWORD
+            - name: RABBITMQ_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: event-mgmt-secrets
+                  key: RABBITMQ_PASSWORD
           readinessProbe:
             httpGet:
               path: /health
@@ -205,6 +308,11 @@ spec:
                 secretKeyRef:
                   name: event-mgmt-secrets
                   key: DB_PASSWORD
+            - name: RABBITMQ_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: event-mgmt-secrets
+                  key: RABBITMQ_PASSWORD
           readinessProbe:
             httpGet:
               path: /health
@@ -253,6 +361,11 @@ spec:
                 secretKeyRef:
                   name: event-mgmt-secrets
                   key: DB_PASSWORD
+            - name: RABBITMQ_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: event-mgmt-secrets
+                  key: RABBITMQ_PASSWORD
           readinessProbe:
             httpGet:
               path: /health
@@ -291,7 +404,13 @@ spec:
           image: event-mgmt/nginx:latest
           imagePullPolicy: Never
           ports:
-            - containerPort: 80
+             - containerPort: 80
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 80
+            initialDelaySeconds: 5
+            periodSeconds: 10
           resources:
             requests:
               cpu: "50m"
