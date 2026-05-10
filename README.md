@@ -1,585 +1,618 @@
-# EventHub — Event Management System
+# Event Management System — Cloud & DevOps Project
 
-A cloud-native microservices platform for managing conferences, workshops, and seminars.
-Built with Docker, Docker Compose (dev / test / prod environments), and Kubernetes (Minikube).
+A microservices-based event management platform demonstrating containerization, orchestration, async messaging, monitoring, and multi-environment deployment.
 
 ---
 
-## Architecture
+## Table of Contents
+
+- [Architecture Overview](#architecture-overview)
+- [Microservices](#microservices)
+- [Technology Stack](#technology-stack)
+- [Project Structure](#project-structure)
+- [Folder Descriptions](#folder-descriptions)
+- [Getting Started](#getting-started)
+- [Environments](#environments)
+- [API Reference](#api-reference)
+- [Monitoring & Observability](#monitoring--observability)
+- [Kubernetes Deployment](#kubernetes-deployment)
+- [CI/CD](#cicd)
+- [Testing](#testing)
+
+---
+
+## Architecture Overview
 
 ```
-                    ┌──────────────────────────────────────────┐
-                    │         Nginx API Gateway (:80)          │
-                    └──────┬──────────┬──────────┬────────────┘
-                           │          │          │          │
-              ┌────────────▼─┐  ┌─────▼────┐  ┌─▼──────────┐  ┌──────────▼───┐
-              │ User Service │  │  Event   │  │Registration│  │Notification  │
-              │   :8001      │  │ Service  │  │  Service   │  │  Service     │
-              │   FastAPI    │  │  :8002   │  │   :8003    │  │   :8004      │
-              └──────┬───────┘  └────┬─────┘  └─────┬──────┘  └──────┬───────┘
-                     │               │               │  Redis Pub/Sub  │
-                     └───────────────┴──────────┬────┘◄───────────────┘
-                                                │
-                              ┌─────────────────┼──────────────────┐
-                              │                 │                  │
-                        ┌─────▼──────┐    ┌─────▼──────┐
-                        │ PostgreSQL │    │   Redis    │
-                        │   :5432    │    │   :6379    │
-                        └────────────┘    └────────────┘
-
-         Monitoring: Prometheus :9090 · Grafana :3000 · Node Exporter :9100
-         Logging:    Promtail (log agent) → Loki :3100 → Grafana Explore
+                          ┌─────────────────────────────────────────┐
+                          │           Nginx (API Gateway)            │
+                          │   Rate Limiting / Reverse Proxy / TLS   │
+                          │              Port 80/8080                │
+                          └──────┬──────┬──────┬──────┬─────────────┘
+                                 │      │      │      │
+                  ┌──────────────┘      │      │      └──────────────┐
+                  ▼                     ▼      ▼                     ▼
+          ┌───────────────┐   ┌───────────────┐  ┌────────────────┐  ┌──────────────────┐
+          │  User Service  │   │ Event Service  │  │ Registration   │  │ Notification     │
+          │   :8001        │   │   :8002        │  │ Service :8003  │  │ Service :8004    │
+          │   FastAPI       │   │   FastAPI      │  │   FastAPI      │  │   FastAPI        │
+          └───────┬────────┘   └───────┬────────┘  └───────┬────────┘  └───────┬──────────┘
+                  │                    │                    │                   │
+                  │        ┌───────────┴────────────────────┘                   │
+                  │        │  Sync HTTP (httpx) for capacity checks             │
+                  │        │                                                    │
+                  ▼        ▼                                                    ▼
+          ┌──────────────────────────────────────────────────────────────────────────┐
+          │                         Async Messaging (RabbitMQ)                       │
+          │  Exchange: "events" (topic)                                              │
+          │  Routing keys: user.registered, event.created,                           │
+          │                 registration.confirmed, registration.cancelled            │
+          │  Consumer: notification-service ← notification_queue                      │
+          └──────────────────────────────────────────────────────────────────────────┘
+                                           │
+                  ┌────────────────────────┼────────────────────────────┐
+                  ▼                        ▼                            ▼
+          ┌──────────────┐        ┌──────────────┐             ┌──────────────┐
+          │  PostgreSQL   │        │    Redis      │             │   RabbitMQ   │
+          │  (Primary DB) │        │  (Cache/      │             │  (Message    │
+          │  Port 5432    │        │   Pub-Sub)    │             │   Broker)    │
+          │               │        │  Port 6379    │             │  5672/15672  │
+          └──────────────┘        └──────────────┘             └──────────────┘
 ```
 
-### Services
+### Communication Patterns
 
-| Service | Port | Responsibility |
-|---|---|---|
-| **user-service** | 8001 | Registration, login, user profiles, token auth via Redis |
-| **event-service** | 8002 | Create/manage events, schedules, capacity |
-| **registration-service** | 8003 | Event bookings, ticket generation, payment status |
-| **notification-service** | 8004 | Reminders, async event handling via Redis Pub/Sub |
-| **nginx** | 80 | API gateway + serves frontend dashboard |
-| **postgres** | 5432 | Primary relational database |
-| **redis** | 6379 | Cache + async message broker (Pub/Sub) |
-| **prometheus** | 9090 | Metrics scraping and storage (bonus) |
-| **loki** | 3100 | Centralized log storage (bonus) |
-| **promtail** | 9080 | Log collection agent — ships container logs to Loki (bonus) |
-| **grafana** | 3000 | Unified metrics + logs dashboard (bonus) |
+| Pattern | Technology | Example |
+|---------|-----------|---------|
+| **Sync request/response** | HTTP (httpx) | Registration service calls event-service to check/increment capacity |
+| **Async fire-and-forget** | RabbitMQ (topic exchange) | User service publishes `user.registered` → notification-service consumes |
+| **Cache/Pub-Sub** | Redis | Services publish to Redis channels as secondary notification path |
+| **API Gateway** | Nginx | All external traffic routes through nginx with rate limiting |
+
+### Design Decisions
+
+| Decision | Choice | Rationale |
+|----------|--------|-----------|
+| Language | Python 3.11 + FastAPI | Async support, auto-docs, lightweight |
+| Password hashing | bcrypt (12 rounds) | Industry standard, adaptive cost |
+| DB connections | ThreadedConnectionPool (2-10) | Reuse connections, avoid per-request overhead |
+| Payment processing | Mock gateway with 5% random decline | Simulates real payment failures for testing |
+| Capacity management | Increment-then-pay with compensating decrement | Prevents race conditions in concurrent registrations |
+| Notification delivery | RabbitMQ consumer only (no Redis subscriber) | Prevents duplicate notifications from dual sources |
+
+---
+
+## Microservices
+
+### User Service (`services/user-service/`)
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/users/register` | POST | Register new user (bcrypt hashing) |
+| `/users/login` | POST | Authenticate, return token |
+| `/users` | GET | List all active users |
+| `/users/{id}` | GET | Get user by ID |
+| `/users/{id}` | DELETE | Soft-delete (is_active=FALSE) |
+| `/health` | GET | Service health check |
+
+**Publishes:** `user.registered` to RabbitMQ
+
+### Event Service (`services/event-service/`)
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/events` | POST | Create event |
+| `/events` | GET | List events (filter by type, status) |
+| `/events/{id}` | GET | Get event by ID |
+| `/events/{id}` | PUT | Update event fields |
+| `/events/{id}` | DELETE | Cancel event (status=cancelled) |
+| `/events/{id}/increment-registration` | PATCH | Atomically increment registered_count (with capacity check) |
+| `/events/{id}/decrement-registration` | PATCH | Atomically decrement registered_count (compensating transaction) |
+| `/health` | GET | Service health check |
+
+**Publishes:** `event.created` to RabbitMQ
+
+### Registration Service (`services/registration-service/`)
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/registrations` | POST | Register for event (payment processing, capacity check) |
+| `/registrations` | GET | List all registrations |
+| `/registrations/{id}` | GET | Get registration by ID |
+| `/registrations/user/{user_id}` | GET | List registrations by user |
+| `/registrations/event/{event_id}` | GET | List confirmed registrations by event |
+| `/registrations/{id}/payment` | PATCH | Update payment status |
+| `/registrations/{id}/process-payment` | POST | Retry payment processing |
+| `/registrations/{id}` | DELETE | Cancel registration (decrements event capacity) |
+| `/health` | GET | Service health check |
+
+**Publishes:** `registration.confirmed`, `registration.cancelled` to RabbitMQ
+
+**Flow:** Fetch event → Increment capacity → Process payment → Insert registration → On failure: compensating decrement
+
+### Notification Service (`services/notification-service/`)
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/notifications` | POST | Create notification |
+| `/notifications/user/{user_id}` | GET | List notifications by user |
+| `/notifications/{id}/read` | PATCH | Mark notification as read |
+| `/notifications/broadcast` | POST | Send notification to multiple users (bulk INSERT) |
+| `/health` | GET | Service health check |
+
+**Consumes:** All routing keys from `events` exchange via `notification_queue` (RabbitMQ consumer thread)
+
+---
+
+## Technology Stack
+
+| Category | Technology | Version | Purpose |
+|----------|-----------|---------|---------|
+| **Runtime** | Python | 3.11-slim | Application runtime |
+| **Framework** | FastAPI | Latest | REST API framework |
+| **Database** | PostgreSQL | 16-alpine | Primary data store |
+| **Cache** | Redis | 7-alpine | Caching, pub-sub |
+| **Message Broker** | RabbitMQ | 3-management-alpine | Async messaging |
+| **API Gateway** | Nginx | Latest | Reverse proxy, rate limiting |
+| **Metrics** | Prometheus | 2.48.0 | Metrics collection |
+| **Visualization** | Grafana | 10.2.0 | Dashboards |
+| **Logging** | Loki + Promtail | 2.9.3 | Centralized log aggregation |
+| **DB Driver** | psycopg2 | Latest | PostgreSQL connection pooling |
+| **HTTP Client** | httpx | Latest | Inter-service communication |
+| **Password** | bcrypt | Latest | Secure password hashing |
+| **Messaging** | pika | Latest | RabbitMQ client |
+| **Metrics** | prometheus-fastapi-instrumentator | Latest | Auto-instrument HTTP metrics |
+| **Containerization** | Docker | — | Multi-stage builds |
+| **Orchestration** | Kubernetes (Minikube) | — | Production deployment |
+| **CI** | GitHub Actions | — | Automated testing |
 
 ---
 
 ## Project Structure
 
 ```
-event-management-system/
-├── manage.sh                        ← one-command environment manager
-├── docker-compose.yml               ← base shared definitions
-├── docker-compose.dev.yml           ← development overrides
-├── docker-compose.test.yml          ← testing overrides + test-runner
-├── docker-compose.prod.yml          ← production overrides
-├── docker-compose.monitoring.yml    ← bonus: Prometheus + Grafana + Loki + Promtail
-├── services/
+event-management-cloud/
+├── .github/
+│   └── workflows/
+│       └── ci.yml                          # GitHub Actions CI pipeline
+├── docker-compose.yml                      # Base definitions (shared services)
+├── docker-compose.dev.yml                  # Development overrides (hot-reload, exposed ports)
+├── docker-compose.test.yml                 # Testing overrides (isolated testdb)
+├── docker-compose.prod.yml                 # Production overrides (replicas, resource limits)
+├── docker-compose.monitoring.yml           # Prometheus, Grafana, Loki, Promtail, exporters
+├── manage.sh                               # Management helper script
+├── README.md                               # This file
+│
+├── services/                               # Microservices (each = separate Docker container)
 │   ├── user-service/
-│   │   ├── main.py
-│   │   ├── requirements.txt
-│   │   └── Dockerfile               ← multi-stage optimized build
+│   │   ├── main.py                         # FastAPI app, routes, models, DB schema
+│   │   ├── Dockerfile                      # Multi-stage build
+│   │   ├── requirements.txt                # Python dependencies
+│   │   └── .dockerignore
 │   ├── event-service/
+│   │   ├── main.py
+│   │   ├── Dockerfile
+│   │   ├── requirements.txt
+│   │   └── .dockerignore
 │   ├── registration-service/
+│   │   ├── main.py
+│   │   ├── Dockerfile
+│   │   ├── requirements.txt
+│   │   └── .dockerignore
 │   └── notification-service/
-├── nginx/
-│   ├── nginx.conf                   ← reverse proxy + routing rules
-│   ├── index.html                   ← frontend dashboard
-│   └── Dockerfile
-├── k8s/
-│   ├── configmaps/config.yaml
-│   ├── deployments/deployments.yaml
-│   ├── services/services.yaml
+│       ├── main.py
+│       ├── Dockerfile
+│       ├── requirements.txt
+│       └── .dockerignore
+│
+├── nginx/                                  # API Gateway + Frontend
+│   ├── nginx.conf                          # Reverse proxy config, rate limiting
+│   ├── Dockerfile                          # Multi-stage build
+│   ├── .dockerignore
+│   ├── index.html                          # Frontend pages
+│   ├── users.html
+│   ├── events.html
+│   ├── registrations.html
+│   ├── notifications.html
+│   └── assets/
+│       ├── style.css                       # Shared styles
+│       └── api.js                          # API client helpers
+│
+├── monitoring/                             # Observability stack configuration
+│   ├── prometheus.yml                      # Scrape targets for all services + exporters
+│   ├── grafana-datasources.yml             # Auto-provisioned Prometheus + Loki datasources
+│   ├── grafana-dashboard-providers.yml     # Dashboard auto-provisioning config
+│   ├── grafana-dashboards/
+│   │   └── event-management-overview.json  # 15-panel Grafana dashboard
+│   ├── loki-config.yml                     # Log aggregation config
+│   └── promtail-config.yml                 # Log shipping from Docker containers
+│
+├── k8s/                                    # Kubernetes manifests
+│   ├── configmaps/
+│   │   └── config.yaml                     # ConfigMap + Secret (DB, Redis, RabbitMQ credentials)
+│   ├── deployments/
+│   │   └── deployments.yaml                # 11 Deployments, 1 DaemonSet, 2 PVCs
+│   ├── services/
+│   │   └── services.yaml                   # 12 Services (ClusterIP + NodePort)
 │   └── monitoring/
-│       ├── loki-deployment.yaml     ← Loki log store (Deployment + Service)
-│       └── promtail-daemonset.yaml  ← Promtail log agent (DaemonSet + RBAC)
-├── monitoring/
-│   ├── prometheus.yml               ← Prometheus scrape config
-│   ├── loki-config.yml              ← Loki server config (filesystem storage)
-│   ├── promtail-config.yml          ← Promtail Docker discovery pipeline
-│   └── grafana-datasources.yml      ← Grafana auto-provisioning (Prometheus + Loki)
-└── tests/
-    └── test_api.py
+│       ├── prometheus-deployment.yaml      # Prometheus with RBAC (ServiceAccount, ClusterRole)
+│       ├── grafana-deployment.yaml         # Grafana with auto-provisioned datasources
+│       ├── loki-deployment.yaml            # Log aggregation
+│       └── promtail-daemonset.yaml         # Log shipper (runs on every node)
+│
+├── tests/
+│   └── test_api.py                         # Integration tests (pytest + requests)
+│
+└── docs/                                   # Project documentation
+    ├── architecture/
+    │   └── overview.md                     # Architecture deep-dive
+    ├── services/
+    │   ├── user-service.md                 # User service specification
+    │   ├── event-service.md                # Event service specification
+    │   ├── registration-service.md         # Registration service specification
+    │   └── notification-service.md         # Notification service specification
+    ├── infrastructure/
+    │   ├── database.md                     # Database schema, indexes, connection pooling
+    │   ├── rabbitmq.md                     # Messaging topology, exchanges, queues
+    │   ├── redis.md                        # Redis usage, pub-sub channels
+    │   └── nginx.md                        # Gateway config, rate limiting, routes
+    ├── api/
+    │   └── endpoints.md                    # Full API reference with examples
+    └── deployment/
+        ├── docker.md                       # Docker & Compose deployment guide
+        ├── kubernetes.md                   # K8s deployment guide
+        └── monitoring.md                   # Monitoring stack setup
 ```
 
 ---
 
-## Docker Images Used
+## Folder Descriptions
 
-| Image | Purpose |
-|---|---|
-| `python:3.11-slim` | Base for all FastAPI services (multi-stage build) |
-| `nginx:1.25-alpine` | API gateway + frontend |
-| `postgres:16-alpine` | Primary database |
-| `redis:7-alpine` | Cache + message broker |
-| `prom/prometheus` | Metrics collection (bonus) |
-| `prom/node-exporter` | Host metrics (bonus) |
-| `prometheuscommunity/postgres-exporter` | PostgreSQL metrics (bonus) |
-| `oliver006/redis_exporter` | Redis metrics (bonus) |
-| `grafana/loki` | Centralized log storage (bonus) |
-| `grafana/promtail` | Log collection agent — reads Docker container logs (bonus) |
-| `grafana/grafana` | Unified metrics + logs dashboards (bonus) |
+### `services/`
 
-All service images use multi-stage builds to minimize final image size (~80–100 MB each).
+Contains four independent FastAPI microservices. Each service has its own Dockerfile, requirements.txt, and .dockerignore. Services are independently deployable and scale horizontally.
 
----
+- **Shared patterns across all services:** DB connection pooling (`ThreadedConnectionPool`), Redis singleton, RabbitMQ publisher, Prometheus instrumentation, CORS middleware, health endpoint, auto-creating DB schema on startup
+- **Each service owns its own table** but shares the same PostgreSQL database
 
-## Windows Setup Guide (WSL2 + Docker Desktop)
+### `nginx/`
 
-The project runs on Linux. On Windows, WSL2 provides a real Linux kernel that fully
-satisfies the "Linux machine" requirement — `uname -a` inside it shows a Linux kernel.
+API gateway and static frontend. Routes external requests to internal services, enforces rate limits, and serves HTML pages. Multi-stage Docker build copies static assets into the nginx image.
 
-### 1. Install WSL2
+- **Rate limits:** Auth endpoints (5 req/s), API endpoints (30 req/s)
+- **Timeouts:** Connect 5s, read 30s, send 30s
+- **Static caching:** JS/CSS/images cached 7 days
 
-Open PowerShell as Administrator:
+### `monitoring/`
 
-```powershell
-wsl --install
-```
+Configuration files for the observability stack. Mounted read-only into their respective containers.
 
-Restart your PC when prompted. After restart Ubuntu opens automatically — set a username
-and password when asked.
+- `prometheus.yml` — Scrapes 8 targets (4 services + 4 exporters)
+- `grafana-datasources.yml` — Auto-provisions Prometheus and Loki as data sources
+- `grafana-dashboard-providers.yml` — Tells Grafana where to find dashboard JSON files
+- `event-management-overview.json` — Pre-built dashboard with 15 panels
+- `loki-config.yml` + `promtail-config.yml` — Centralized log collection from Docker containers
 
-> **Note:** After the restart you will land directly inside the Ubuntu terminal.
-> `wsl --shutdown` is a PowerShell command — if you need to run it, type `exit` first
-> to leave Ubuntu, then run it in PowerShell.
+### `k8s/`
 
-### 2. Connect Docker Desktop to WSL2
+Kubernetes manifests for production deployment. Designed for Minikube with locally built images (`imagePullPolicy: Never`).
 
-Open Docker Desktop → ⚙️ Settings → Resources → WSL Integration:
+- **ConfigMaps + Secrets:** Centralized configuration, credentials via secretKeyRef
+- **Deployments:** 11 Deployments (4 services + postgres + redis + rabbitmq + nginx + monitoring stack), 1 DaemonSet (promtail), 2 PVCs (postgres 1Gi, redis 512Mi)
+- **Services:** ClusterIP for internal communication, NodePort for external access
+- **RBAC:** Prometheus has ServiceAccount + ClusterRole + ClusterRoleBinding for Kubernetes service discovery
 
-- "Enable integration with my default WSL distro" → **ON**
-- Toggle Ubuntu → **ON**
+### `tests/`
 
-Click **Apply & Restart**.
+Integration tests using pytest. Runs against the full stack via the test Docker Compose overlay.
 
-### 3. Limit RAM (important for older / slower laptops)
+### `.github/`
 
-In PowerShell:
-
-```powershell
-notepad "$env:USERPROFILE\.wslconfig"
-```
-
-Paste this, save, and close Notepad:
-
-```ini
-[wsl2]
-memory=3GB
-processors=2
-swap=1GB
-```
-
-Then shut down WSL so the limits apply on next launch:
-
-```powershell
-wsl --shutdown
-```
-
-### 4. Open Ubuntu and verify Docker works
-
-Search **Ubuntu** in the Start menu and open it. You should see a prompt like
-`user@LAPTOP:~$`. Run:
-
-```bash
-docker ps
-```
-
-Expected output: an empty table with no errors. If you get a permission error run:
-
-```bash
-sudo usermod -aG docker $USER
-newgrp docker
-```
-
-### 5. Copy the project into WSL2 and run it
-
-Windows drives are mounted under `/mnt/` in WSL2. For example `E:\cloud\` becomes
-`/mnt/e/cloud/`. Adjust the path below to wherever you extracted the project:
-
-```bash
-cp /mnt/e/cloud/event-management-system.tar.gz ~/
-cd ~
-tar -xzf event-management-system.tar.gz
-cd event-management-system
-chmod +x manage.sh
-./manage.sh up dev
-```
-
-The first run takes 5–10 minutes on a slow laptop while Docker builds all images.
-When you see:
-
-```
-✅  dev environment running:
-   Frontend:    http://localhost:8080
-```
-
-Open `http://localhost:8080` in your **Windows** browser (Chrome, Edge, etc.).
-WSL2 automatically forwards ports to Windows so localhost works from either side.
+GitHub Actions CI pipeline. Runs on push/PR, executes tests via `manage.sh test`.
 
 ---
 
-## Running the Project
+## Getting Started
 
-### Development environment (port 8080)
+### Prerequisites
 
-```bash
-./manage.sh up dev
-```
+- Docker Desktop (or Docker Engine + Docker Compose)
+- 4 GB RAM minimum (8 GB recommended)
+- Git
 
-- Hot-reload enabled — code changes apply without rebuilding
-- PostgreSQL (:5432) and Redis (:6379) ports exposed for local tools
-- Each service directly accessible on ports 8001–8004
-- Debug logging enabled
+### Quick Start (Development)
 
 ```bash
-# With Prometheus + Grafana monitoring (bonus):
-./manage.sh up dev --monitor
+# Clone the repository
+git clone <repo-url>
+cd event-management-cloud
+
+# Start all services with hot-reload + monitoring
+docker compose -f docker-compose.yml \
+               -f docker-compose.dev.yml \
+               -f docker-compose.monitoring.yml \
+               up --build
+
+# Wait for all health checks to pass (~30 seconds)
 ```
 
-### Testing environment (port 8081)
+### Access Points
 
-Uses an isolated `testdb` database so tests never pollute development data.
-The `test-runner` container runs the full pytest suite automatically and exits.
+| Service | URL | Credentials |
+|---------|-----|------------|
+| Frontend (nginx) | http://localhost:8080 | — |
+| User Service | http://localhost:8001 | — |
+| Event Service | http://localhost:8002 | — |
+| Registration Service | http://localhost:8003 | — |
+| Notification Service | http://localhost:8004 | — |
+| Prometheus | http://localhost:9090 | — |
+| Grafana | http://localhost:3000 | admin / admin |
+| RabbitMQ Management | http://localhost:15672 | guest / guest |
+| PostgreSQL | localhost:5432 | postgres / postgres |
+| Redis | localhost:6379 | — |
+
+### Quick API Test
 
 ```bash
-./manage.sh test
+# Register a user
+curl -X POST http://localhost:8080/api/users/register \
+  -H "Content-Type: application/json" \
+  -d '{"username":"alice","email":"alice@test.com","password":"Password123","full_name":"Alice"}'
+
+# Login
+curl -X POST http://localhost:8080/api/users/login \
+  -H "Content-Type: application/json" \
+  -d '{"email":"alice@test.com","password":"Password123"}'
+
+# Create an event
+curl -X POST http://localhost:8080/api/events \
+  -H "Content-Type: application/json" \
+  -d '{"title":"Tech Summit","description":"Annual conference","event_type":"conference","start_date":"2026-07-01 09:00:00","end_date":"2026-07-03 18:00:00","location":"Convention Center","max_capacity":200,"organizer_id":1,"ticket_price":49.99}'
+
+# Register for event
+curl -X POST http://localhost:8080/api/registrations \
+  -H "Content-Type: application/json" \
+  -d '{"user_id":1,"event_id":1,"payment_method":"card"}'
+
+# View notifications
+curl http://localhost:8080/api/notifications/user/1
 ```
 
-### Production environment (port 8082)
+---
+
+## Environments
+
+| Environment | Command | Port | DB | Special Features |
+|-------------|---------|------|----|-----------------|
+| **Development** | `-f docker-compose.yml -f docker-compose.dev.yml up` | 8080 | eventdb | Hot-reload, exposed service ports, debug logging |
+| **Testing** | `-f docker-compose.yml -f docker-compose.test.yml up` | 8081 | testdb | Isolated DB, test-runner container |
+| **Production** | `-f docker-compose.yml -f docker-compose.prod.yml up` | 8082 | eventdb_prod | 2 replicas, resource limits, secure credentials |
+| **+ Monitoring** | Append `-f docker-compose.monitoring.yml` to any | — | — | Prometheus, Grafana, Loki, exporters |
+
+### Development
 
 ```bash
-# Create secrets file first:
-echo "DB_PASSWORD=your_secure_password" > .env
-echo "REDIS_PASSWORD=your_redis_password" >> .env
-
-./manage.sh up prod
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build
 ```
 
-Production differences from dev:
-- No exposed DB or Redis ports
-- CPU and memory limits enforced per container
-- `restart: always` policies
-- 2 replicas of user-service and event-service
+- Volume mounts for hot-reload (code changes reflected without rebuild)
+- Direct service port access for debugging (8001-8004)
+- PostgreSQL and Redis ports exposed for local tools
+- Debug-level logging
 
-### Running all three environments simultaneously
-
-All three environments use different ports and isolated volumes, so they can run on
-the same machine at the same time:
+### Testing
 
 ```bash
-./manage.sh up dev &
-./manage.sh up test &
-./manage.sh up prod
-# Dev: :8080 | Test: :8081 | Prod: :8082
+docker compose -f docker-compose.yml -f docker-compose.test.yml up --build
 ```
 
-### Stopping
+- Separate `testdb` database
+- Test runner container (pytest) auto-runs and exits
+- Services use isolated volume (`postgres_test_data`)
+
+### Production
 
 ```bash
-./manage.sh down dev     # stop dev
-./manage.sh down prod    # stop prod
-./manage.sh clean        # stop everything and wipe all volumes
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up --build -d
 ```
+
+- User/Event services: 2 replicas each
+- Resource limits per service (CPU/memory)
+- Production database (`eventdb_prod`)
+- Credentials via environment variables (`${DB_PASSWORD}`, etc.)
+- No exposed infrastructure ports (postgres, redis internal only)
 
 ---
 
 ## API Reference
 
-All routes go through the Nginx gateway. Replace `8080` with `8081`/`8082` for
-test/prod environments.
+All endpoints are accessed through the nginx gateway at `http://localhost:8080/api/`.
 
-### User Service — `http://localhost:8080/api/users`
+### Nginx Route Mapping
 
-```
-POST   /api/users/register          Register a new user
-POST   /api/users/login             Login → returns session token (stored in Redis)
-GET    /api/users                   List all active users
-GET    /api/users/{id}              Get user by ID
-DELETE /api/users/{id}              Deactivate user
-```
+| Gateway Route | Upstream Route | Service |
+|--------------|---------------|---------|
+| `/api/users/register` | `/users/register` | user-service |
+| `/api/users/login` | `/users/login` | user-service |
+| `/api/users` | `/users` | user-service |
+| `/api/events` | `/events` | event-service |
+| `/api/registrations` | `/registrations` | registration-service |
+| `/api/notifications` | `/notifications` | notification-service |
 
-### Event Service — `http://localhost:8080/api/events`
+### Payment Processing
 
-```
-POST   /api/events                  Create a new event
-GET    /api/events                  List events  (?event_type=conference|workshop|seminar)
-GET    /api/events/{id}             Get event details
-PUT    /api/events/{id}             Update event fields
-DELETE /api/events/{id}             Cancel event (sets status=cancelled)
-```
+The registration service includes a mock payment gateway supporting:
 
-### Registration Service — `http://localhost:8080/api/registrations`
+| Method | Behavior |
+|--------|----------|
+| `free` | Always succeeds (for events with ticket_price=0) |
+| `card` / `credit_card` | 95% success, 5% random decline |
+| `paypal` | 95% success, 5% random decline |
+| `bank_transfer` | 95% success, 5% random decline |
 
-```
-POST   /api/registrations           Register for event → returns ticket number
-GET    /api/registrations/{id}      Get registration by ID
-GET    /api/registrations/user/{id} All registrations for a user
-GET    /api/registrations/event/{id} All confirmed attendees for an event
-PATCH  /api/registrations/{id}/payment  Update payment status
-DELETE /api/registrations/{id}      Cancel registration
-```
-
-### Notification Service — `http://localhost:8080/api/notifications`
-
-```
-POST   /api/notifications           Send a manual notification
-GET    /api/notifications/user/{id} Get all notifications for a user
-PATCH  /api/notifications/{id}/read Mark notification as read
-POST   /api/notifications/broadcast Send to multiple users
-```
+On payment failure, the system automatically performs a compensating transaction (decrements event capacity) and returns HTTP 402.
 
 ---
 
-## Kubernetes (Minikube)
+## Monitoring & Observability
 
-Minikube is the lightweight local Kubernetes option. Using `--driver=docker` runs the
-entire cluster inside a Docker container instead of a VM — much easier on older hardware.
+### Prometheus Targets (8 total)
 
-```bash
-# Install Minikube inside WSL2
-curl -LO https://storage.googleapis.com/minikube/releases/latest/minikube-linux-amd64
-sudo install minikube-linux-amd64 /usr/local/bin/minikube
-sudo snap install kubectl --classic
+| Target | Scrape URL | Description |
+|--------|-----------|-------------|
+| user-service | `http://user-service:8000/metrics` | HTTP metrics, Python runtime |
+| event-service | `http://event-service:8000/metrics` | HTTP metrics, Python runtime |
+| registration-service | `http://registration-service:8000/metrics` | HTTP metrics, Python runtime |
+| notification-service | `http://notification-service:8000/metrics` | HTTP metrics, Python runtime |
+| postgres-exporter | `http://postgres-exporter:9187/metrics` | Database metrics |
+| redis-exporter | `http://redis-exporter:9121/metrics` | Cache metrics |
+| node-exporter | `http://node-exporter:9100/metrics` | System metrics |
+| prometheus | `http://localhost:9090/metrics` | Self-monitoring |
 
-# Start cluster (lightweight settings)
-minikube start --driver=docker --cpus=2 --memory=2048
+### Grafana Dashboard (15 panels)
 
-# Build images inside Minikube's Docker daemon and deploy
-./manage.sh k8s-up
+- Service Status (4 panels)
+- Infrastructure Status (PostgreSQL, Redis, RabbitMQ)
+- Request Rate (req/s per service)
+- Response Time (p50, p95, p99)
+- Error Rate (5xx responses)
+- CPU / Memory per container
+- Database connections
+- Redis hit rate
 
-# Get the URL to open in your browser
-minikube service nginx --url
+### Log Aggregation
 
-# Useful kubectl commands
-kubectl get pods
-kubectl get services
-kubectl logs deployment/user-service
-kubectl scale deployment event-service --replicas=3
+Promtail collects container logs from Docker and ships them to Loki. Query in Grafana Explore:
 
-# Tear down
-./manage.sh k8s-down
-minikube stop
 ```
-
----
-
-## Monitoring (Bonus)
-
-Add the full monitoring stack to any environment:
-
-```bash
-./manage.sh up dev --monitor
-
-# Prometheus:  http://localhost:9090
-# Grafana:     http://localhost:3000  (login: admin / admin)
-# Loki:        http://localhost:3100  (log storage API)
-# Promtail:    http://localhost:9080  (shipper health)
-```
-
-**Grafana is auto-configured** — both Prometheus and Loki data sources are provisioned automatically on first start. No manual setup required.
-
-**Grafana quick setup for dashboards:**
-1. Go to **Dashboards → Import** → ID `1860` — Node Exporter Full (host metrics)
-2. Go to **Dashboards → Import** → ID `9628` — PostgreSQL metrics
-
----
-
-## Centralized Logging (Bonus)
-
-All container logs are automatically collected by **Promtail** and stored in **Loki**.
-You can query them from the **Grafana Explore** tab using **LogQL**.
-
-### Start the logging stack
-
-```bash
-./manage.sh up dev --monitor
-# Promtail discovers all containers on event-network automatically
-# No code changes needed in any service
-```
-
-### Query logs in Grafana
-
-1. Open **http://localhost:3000** (admin / admin)
-2. Go to **Explore** (compass icon in left sidebar)
-3. Select **Loki** as the data source
-4. Use **LogQL** to query:
-
-```logql
-# All logs from the user service
 {service="user-service"}
-
-# All logs from all microservices
-{service=~"user-service|event-service|registration-service|notification-service"}
-
-# Filter for errors only
-{service="registration-service"} |= "ERROR"
-
-# Nginx access logs, 5xx errors only
-{service="nginx"} | status >= 500
-
-# Count log lines per service over time (rate)
-sum by (service) (rate({service=~".+"}[5m]))
-```
-
-### Log pipeline
-
-```
-Docker container stdout/stderr
-        │
-        ▼
-   Promtail (:9080)          ← discovers containers via /var/run/docker.sock
-   labels: service, container_name, stream
-        │  HTTP push
-        ▼
-   Loki (:3100)              ← stores logs on filesystem (/loki)
-        │  LogQL
-        ▼
-   Grafana (:3000)           ← Explore → Loki data source
-```
-
-### Kubernetes logging
-
-When deployed via Minikube, Promtail runs as a **DaemonSet** (one pod per node):
-
-```bash
-./manage.sh k8s-up
-
-# Access Grafana for logs:
-kubectl port-forward svc/grafana 3000:3000
-
-# Check Promtail is shipping logs:
-kubectl logs daemonset/promtail
-
-# Check Loki health:
-kubectl port-forward svc/loki 3100:3100
-curl http://localhost:3100/ready
+{service="registration-service"} |= "error"
 ```
 
 ---
 
-## Async Communication (Bonus)
+## Kubernetes Deployment
 
-The system uses **Redis Pub/Sub** for decoupled async messaging between services.
-No service calls another directly for notifications — they publish an event and move on.
+### Prerequisites
 
-| Channel | Published by | Consumed by | When |
-|---|---|---|---|
-| `notification_events` | Registration Service | Notification Service | User registers for an event |
-| `user_events` | User Service | Notification Service | New user account created |
-| `event_events` | Event Service | Notification Service | New event created |
+- Minikube
+- kubectl
+- Docker (images built locally)
 
-The notification service runs a background thread that subscribes to all three channels
-and automatically stores the appropriate notification when any event arrives.
+### Deploy
 
-To watch it live:
 ```bash
-docker exec -it event-management-system-redis-1 redis-cli subscribe notification_events
+# Start Minikube
+minikube start
+
+# Build images in Minikube's Docker daemon
+eval $(minikube docker-env)
+docker compose -f docker-compose.yml build
+
+# Apply manifests
+kubectl apply -f k8s/configmaps/
+kubectl apply -f k8s/services/
+kubectl apply -f k8s/deployments/
+kubectl apply -f k8s/monitoring/
+
+# Wait for pods
+kubectl get pods -w
+```
+
+### K8s Resources Summary
+
+| Type | Count | Details |
+|------|-------|---------|
+| Deployments | 11 | 4 services + postgres + redis + rabbitmq + nginx + prometheus + grafana + loki |
+| DaemonSets | 1 | promtail (log collection on every node) |
+| Services | 12 | ClusterIP for internal, NodePort for external |
+| ConfigMaps | 1 | Application configuration |
+| Secrets | 1 | DB, Redis, RabbitMQ credentials |
+| PVCs | 2 | postgres (1Gi), redis (512Mi) |
+| ServiceAccounts | 1 | Prometheus |
+| ClusterRoles | 1 | Prometheus kube-api access |
+| ClusterRoleBindings | 1 | Prometheus RBAC binding |
+
+---
+
+## CI/CD
+
+### GitHub Actions Pipeline
+
+`.github/workflows/ci.yml` runs on every push and pull request:
+
+1. Checks out code
+2. Sets up Docker Buildx
+3. Builds all service images
+4. Runs integration tests via `manage.sh test`
+
+---
+
+## Testing
+
+```bash
+# Run integration tests
+docker compose -f docker-compose.yml -f docker-compose.test.yml up --build test-runner
+
+# Or use the management script
+./manage.sh test
+```
+
+### Test Coverage
+
+- User registration, login, retrieval, deletion
+- Event CRUD, capacity management
+- Registration with payment processing (success/failure)
+- Notification delivery verification
+- Cross-service communication via RabbitMQ
+
+---
+
+## Database Schema
+
+### Tables
+
+| Table | Service | Columns |
+|-------|---------|---------|
+| `users` | user-service | id, username, email, password_hash, full_name, created_at, is_active |
+| `events` | event-service | id, title, description, event_type, start_date, end_date, location, max_capacity, registered_count, organizer_id, ticket_price, status, created_at |
+| `registrations` | registration-service | id, user_id, event_id, registration_date, status, payment_method, payment_status, payment_reference, payment_gateway, payment_processed_at, ticket_number, notes |
+| `notifications` | notification-service | id, user_id, title, message, notification_type, is_read, created_at |
+
+### Indexes
+
+| Table | Index | Purpose |
+|-------|-------|---------|
+| `users` | `idx_users_email` | Fast email lookup (WHERE is_active=TRUE) |
+| `events` | `idx_events_status_type` | Filter by status + event_type |
+| `events` | `idx_events_start_date` | Sort by date |
+| `registrations` | `idx_reg_user` | User's registrations |
+| `registrations` | `idx_reg_event_status` | Event attendees |
+| `notifications` | `idx_notifications_user_read` | User's notifications with read filter |
+
+### Connection Pooling
+
+Each service uses `psycopg2.pool.ThreadedConnectionPool(minconn=2, maxconn=10)` to reuse database connections across requests.
+
+---
+
+## Management Script
+
+```bash
+./manage.sh [command]
+
+Commands:
+  dev       Start development environment
+  test      Run integration tests
+  prod      Start production environment
+  down      Stop all environments
+  clean     Remove all containers, volumes, and images
+  logs      Tail logs from all services
+  health    Check health of all services
 ```
 
 ---
 
-## Useful Commands
+## License
 
-```bash
-# Check all running containers and their ports
-docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
-
-# View logs for a specific service
-docker logs event-management-system-nginx-1
-docker logs event-management-system-user-service-1 --follow
-
-# Open a psql shell directly
-docker exec -it event-management-system-postgres-1 psql -U postgres -d eventdb
-
-# Open Redis CLI
-docker exec -it event-management-system-redis-1 redis-cli
-
-# Monitor resource usage
-docker stats
-
-# Rebuild a single service without restarting everything
-docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build -d user-service
-```
-
----
-
-## Debugging & Known Issues
-
-### Issue 1 — nginx crashes: "unknown $remote_method variable"
-
-**Symptom:** After `./manage.sh up dev`, nginx is missing from `docker ps`.
-Port 8080 is unreachable. Running `docker logs event-management-system-nginx-1` shows:
-
-```
-[emerg] 1#1: unknown "remote_method" variable
-```
-
-**Cause:** Typo in `nginx/nginx.conf`. The variable `$remote_method` does not exist
-in nginx.
-
-**Fix:** In `nginx/nginx.conf` change:
-
-```nginx
-'$remote_addr - $remote_method [$time_local] "$request" '
-```
-
-to:
-
-```nginx
-'$remote_addr - $request_method [$time_local] "$request" '
-```
-
-Then rebuild only nginx (no need to restart other containers):
-
-```bash
-docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build -d nginx
-```
-
----
-
-### Issue 2 — Dashboard shows "error 422" / "error 404" for all services
-
-**Symptom:** The frontend loads at `http://localhost:8080` but all four service
-health badges show red errors.
-
-**Cause:** The health check URLs in `nginx/index.html` were routing through the Nginx
-proxy (e.g. `/api/users/health` → `/users/health` on the service) which does not exist.
-The correct health endpoint on each service is `/health` at the root.
-
-**Fix:** In `nginx/index.html` find the SERVICES array and change it to hit each
-service directly on its exposed dev port:
-
-```javascript
-const SERVICES = [
-  { name: 'User Service',          url: 'http://localhost:8001/health', display: ':8001' },
-  { name: 'Event Service',         url: 'http://localhost:8002/health', display: ':8002' },
-  { name: 'Registration Service',  url: 'http://localhost:8003/health', display: ':8003' },
-  { name: 'Notification Service',  url: 'http://localhost:8004/health', display: ':8004' },
-];
-```
-
-Then rebuild nginx:
-
-```bash
-docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build -d nginx
-```
-
----
-
-### Issue 3 — "wsl: command not found" in Ubuntu terminal
-
-**Cause:** `wsl --shutdown` is a PowerShell/Windows command. Running it inside the
-Ubuntu terminal doesn't work.
-
-**Fix:** Type `exit` to leave Ubuntu and return to PowerShell, then run the command there.
-
----
-
-### General troubleshooting tips
-
-**Services show "unreachable" right after startup** — the containers are still
-initializing. Wait 30 seconds and refresh the browser.
-
-**Port already in use** — something else is using 8080. Run `./manage.sh down dev`,
-wait a few seconds, then `./manage.sh up dev` again.
-
-**Containers crash or restart repeatedly** — likely an out-of-memory situation on
-an older laptop. Close Chrome and other heavy apps, then:
-
-```bash
-./manage.sh down dev
-./manage.sh up dev
-```
-
-**Full reset — wipe everything and start clean:**
-
-```bash
-./manage.sh clean
-./manage.sh up dev
-```
+This project is built for educational purposes as part of a Cloud Computing & DevOps course.
