@@ -19,7 +19,7 @@ scrape_configs:
         filters:
           # Only collect logs from our event-network containers
           - name: network
-            values: ["event-network"]
+            values: ["event-management-cloud_event-network"]
 
     relabel_configs:
       # Use the container name as the "container" label (strip leading /)
@@ -51,7 +51,7 @@ scrape_configs:
             level: level
             msg: msg
             time: time
-          drop_malformed: true  # Keep raw lines that are not JSON
+          drop_malformed: false  # Do not drop raw lines that are not JSON
 
       # Map the "level" field to a Loki label for easy filtering
       - labels:
