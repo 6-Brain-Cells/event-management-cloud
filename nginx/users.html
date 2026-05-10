@@ -8,13 +8,15 @@
 </head>
 <body>
   <main class="main">
-    <div style="display: grid; grid-template-columns: 1fr; gap: 2rem;">
-      <!-- Registration Form -->
+    <h1 class="page-title">Users</h1>
+    <p class="page-subtitle">Manage user accounts and profiles</p>
+
+    <div class="section-grid">
       <section class="card">
         <div class="card-header">
           <h2>Register New User</h2>
         </div>
-        <form id="register-form" style="display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem;">
+        <form id="register-form" class="form-grid">
           <div class="form-group">
             <label for="username">Username</label>
             <input type="text" id="username" name="username" required placeholder="johndoe">
@@ -31,33 +33,29 @@
             <label for="password">Password</label>
             <input type="password" id="password" name="password" required placeholder="••••••••">
           </div>
-          <div style="grid-column: 1 / -1; display: flex; justify-content: space-between; align-items: center; margin-top: 1rem;">
-            <div id="register-status" style="font-size: 0.9rem; font-weight: 500;"></div>
+          <div class="form-actions">
+            <div id="register-status" class="status-message"></div>
             <button type="submit">Create Account</button>
           </div>
         </form>
       </section>
 
-      <!-- Users List -->
       <section class="card">
         <div class="card-header">
-          <h2>Registered Users</h2>
-          <button id="refresh-users" class="secondary" style="margin: 0; padding: 0.5rem 1rem;">↻ Refresh</button>
+          <h2>All Users</h2>
+          <button id="refresh-users" class="secondary" style="margin:0;">Refresh</button>
         </div>
         <div id="users-grid" class="grid-container">
-          <!-- Populated via JS -->
-          <div class="empty-state">Loading users...</div>
+          <div class="empty-state"><span class="empty-state-icon">⏳</span><span class="empty-state-text">Loading users...</span></div>
         </div>
       </section>
     </div>
   </main>
 
-  <footer>© 2026 EventHub Cloud-Native Platform</footer>
+  <footer>© 2026 EventHub — Cloud-Native Event Management Platform</footer>
 
   <script type="module">
-    import { apiCall, renderNavbar } from './assets/api.js';
-
-    // Inject Navigation
+    import { apiCall, renderNavbar, getInitials, getAvatarColor, showToast } from './assets/api.js';
     renderNavbar('users');
 
     const registerForm = document.getElementById('register-form');
@@ -69,58 +67,63 @@
       try {
         const data = await apiCall('/api/users');
         const users = data.users || [];
-        
         usersGrid.innerHTML = '';
-        
+
         if (users.length === 0) {
-          usersGrid.innerHTML = '<div class="empty-state">No users found. Create one above!</div>';
+          usersGrid.innerHTML = '<div class="empty-state"><span class="empty-state-icon">👤</span><span class="empty-state-text">No users yet. Create one above!</span></div>';
           return;
         }
 
         users.forEach(user => {
           const card = document.createElement('div');
           card.className = 'data-card';
+          card.style.flexDirection = 'row';
+          card.style.alignItems = 'center';
+          card.style.gap = '1rem';
           card.innerHTML = `
-            <div style="display: flex; justify-content: space-between; align-items: flex-start;">
-              <h3>${user.full_name}</h3>
-              <span class="data-badge primary">ID: ${user.id}</span>
+            <div class="avatar ${getAvatarColor(user.id)}">${getInitials(user.full_name)}</div>
+            <div style="flex:1;min-width:0;">
+              <h3 style="margin-bottom:0.1rem;">${user.full_name}</h3>
+              <p style="font-size:0.85rem;color:var(--text-secondary);margin:0;">@${user.username}</p>
+              <p style="font-size:0.8rem;color:var(--muted);margin:0;">${user.email}</p>
             </div>
-            <p style="margin: 0;"><strong>@${user.username}</strong></p>
-            <p style="margin: 0; font-size: 0.9rem; color: var(--muted);">${user.email}</p>
+            <span class="badge neutral">#${user.id}</span>
           `;
           usersGrid.appendChild(card);
         });
       } catch (err) {
-        console.error(err);
-        usersGrid.innerHTML = `<div class="empty-state" style="color: var(--danger);">Error: ${err.message}</div>`;
+        usersGrid.innerHTML = '<div class="empty-state"><span class="empty-state-icon">⚠️</span><span class="empty-state-text">Error loading users</span></div>';
+        showToast(err.message, 'error');
       }
     }
 
     registerForm.addEventListener('submit', async (e) => {
       e.preventDefault();
-      registerStatus.textContent = 'Registering...';
-      registerStatus.style.color = 'var(--muted)';
-      
+      registerStatus.textContent = '';
+      const btn = registerForm.querySelector('button[type="submit"]');
+      btn.disabled = true;
+      btn.innerHTML = '<span class="spinner"></span> Creating...';
+
       const formData = new FormData(registerForm);
       const data = Object.fromEntries(formData.entries());
-      
+
       try {
         await apiCall('/api/users/register', 'POST', data);
-        registerStatus.textContent = 'User registered successfully!';
-        registerStatus.style.color = 'var(--success)';
+        showToast('Account created successfully!', 'success');
         registerForm.reset();
         loadUsers();
-        // Force refresh of the navbar user selector
         setTimeout(() => window.location.reload(), 1500);
       } catch (err) {
-        registerStatus.textContent = 'Error: ' + err.message;
+        registerStatus.textContent = err.message;
         registerStatus.style.color = 'var(--danger)';
+        showToast(err.message, 'error');
+      } finally {
+        btn.disabled = false;
+        btn.textContent = 'Create Account';
       }
     });
 
     refreshBtn.addEventListener('click', loadUsers);
-    
-    // Initial load
     loadUsers();
   </script>
 </body>

@@ -8,38 +8,148 @@
 </head>
 <body>
   <main class="main">
-    <div class="card" style="text-align: center; padding: 4rem 2rem;">
-      <h2 style="font-size: 2.5rem; margin-bottom: 1rem;">Welcome to EventHub</h2>
-      <p style="font-size: 1.1rem; max-width: 600px; margin: 0 auto; color: var(--muted);">
-        A modern, cloud-native platform for managing conferences, workshops, and seminars.
-        Select your active profile from the top right to get started.
-      </p>
-      
-      <div class="grid-container mt-2">
-        <a href="/events.html" class="data-card" style="text-decoration: none; align-items: center;">
-          <div style="font-size: 2.5rem; margin-bottom: 0.5rem;">📅</div>
-          <h3>Browse Events</h3>
-          <p style="font-size: 0.9rem; text-align: center;">Discover and register for upcoming events with a single click.</p>
-        </a>
-        <a href="/registrations.html" class="data-card" style="text-decoration: none; align-items: center;">
-          <div style="font-size: 2.5rem; margin-bottom: 0.5rem;">🎟️</div>
-          <h3>My Tickets</h3>
-          <p style="font-size: 0.9rem; text-align: center;">View and manage your current event registrations.</p>
-        </a>
-        <a href="/notifications.html" class="data-card" style="text-decoration: none; align-items: center;">
-          <div style="font-size: 2.5rem; margin-bottom: 0.5rem;">🔔</div>
-          <h3>Notifications</h3>
-          <p style="font-size: 0.9rem; text-align: center;">Check your inbox for updates and reminders.</p>
-        </a>
-      </div>
+    <h1 class="page-title">Dashboard</h1>
+    <p class="page-subtitle">Your event management command center</p>
+
+    <div id="stats-grid" class="stats-grid"></div>
+
+    <div class="section-grid">
+      <section class="card">
+        <div class="card-header">
+          <h2>Quick Actions</h2>
+        </div>
+        <div class="quick-links">
+          <a href="/events.html" class="quick-link">
+            <div class="quick-link-icon purple">📅</div>
+            <div class="quick-link-text">
+              <h3>Browse Events</h3>
+              <p>Discover and register for upcoming events</p>
+            </div>
+          </a>
+          <a href="/events.html" class="quick-link">
+            <div class="quick-link-icon green">➕</div>
+            <div class="quick-link-text">
+              <h3>Host an Event</h3>
+              <p>Create and publish a new event</p>
+            </div>
+          </a>
+          <a href="/registrations.html" class="quick-link">
+            <div class="quick-link-icon blue">🎟️</div>
+            <div class="quick-link-text">
+              <h3>My Tickets</h3>
+              <p>View and manage your registrations</p>
+            </div>
+          </a>
+          <a href="/notifications.html" class="quick-link">
+            <div class="quick-link-icon yellow">🔔</div>
+            <div class="quick-link-text">
+              <h3>Notifications</h3>
+              <p>Check your alerts and reminders</p>
+            </div>
+          </a>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="card-header">
+          <h2>Recent Events</h2>
+          <a href="/events.html" class="btn secondary" style="padding: 0.4rem 0.8rem; font-size: 0.8rem;">View All</a>
+        </div>
+        <div id="recent-events" class="grid-container">
+          <div class="empty-state"><span class="empty-state-icon">⏳</span><span class="empty-state-text">Loading events...</span></div>
+        </div>
+      </section>
     </div>
   </main>
 
-  <footer>© 2026 EventHub Cloud-Native Platform</footer>
+  <footer>© 2026 EventHub — Cloud-Native Event Management Platform</footer>
 
   <script type="module">
-    import { renderNavbar } from './assets/api.js';
+    import { apiCall, renderNavbar, getActiveUserId, getEventTypeIcon, formatCurrency, showToast } from './assets/api.js';
     renderNavbar('home');
+
+    const statsGrid = document.getElementById('stats-grid');
+    const recentEvents = document.getElementById('recent-events');
+
+    async function loadDashboard() {
+      try {
+        const [usersData, eventsData, regsData] = await Promise.all([
+          apiCall('/api/users').catch(() => ({ users: [] })),
+          apiCall('/api/events').catch(() => ({ events: [] })),
+          getActiveUserId()
+            ? apiCall(`/api/registrations/user/${getActiveUserId()}`).catch(() => ({ registrations: [] }))
+            : Promise.resolve({ registrations: [] }),
+        ]);
+
+        const users = usersData.users || [];
+        const events = eventsData.events || [];
+        const regs = regsData.registrations || [];
+        const upcomingCount = events.filter(e => new Date(e.start_date) > new Date()).length;
+
+        statsGrid.innerHTML = `
+          <div class="stat-card">
+            <div class="stat-icon purple">📅</div>
+            <div class="stat-content">
+              <div class="stat-value">${events.length}</div>
+              <div class="stat-label">Total Events</div>
+            </div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-icon green">🗓️</div>
+            <div class="stat-content">
+              <div class="stat-value">${upcomingCount}</div>
+              <div class="stat-label">Upcoming</div>
+            </div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-icon blue">👥</div>
+            <div class="stat-content">
+              <div class="stat-value">${users.length}</div>
+              <div class="stat-label">Users</div>
+            </div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-icon yellow">🎟️</div>
+            <div class="stat-content">
+              <div class="stat-value">${regs.length}</div>
+              <div class="stat-label">My Tickets</div>
+            </div>
+          </div>
+        `;
+
+        recentEvents.innerHTML = '';
+        if (events.length === 0) {
+          recentEvents.innerHTML = '<div class="empty-state"><span class="empty-state-icon">📭</span><span class="empty-state-text">No events yet. Be the first to host one!</span></div>';
+          return;
+        }
+
+        events.slice(0, 6).forEach(event => {
+          const card = document.createElement('div');
+          card.className = 'data-card';
+          const startDate = new Date(event.start_date).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+          const startTime = new Date(event.start_date).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+
+          card.innerHTML = `
+            <div style="display:flex;justify-content:space-between;align-items:center;">
+              <span class="badge primary">${event.event_type}</span>
+              <span class="badge neutral">${formatCurrency(event.ticket_price)}</span>
+            </div>
+            <h3>${event.title}</h3>
+            <p style="font-size:0.82rem;color:var(--text-secondary);line-height:1.4;flex:1;">${event.description || 'No description provided'}</p>
+            <div style="display:flex;gap:0.75rem;font-size:0.78rem;color:var(--muted);flex-wrap:wrap;">
+              <span>📍 ${event.location || 'TBA'}</span>
+              <span>📅 ${startDate}</span>
+              <span>🕐 ${startTime}</span>
+            </div>
+          `;
+          recentEvents.appendChild(card);
+        });
+      } catch (err) {
+        showToast('Failed to load dashboard data', 'error');
+      }
+    }
+
+    loadDashboard();
   </script>
 </body>
 </html>

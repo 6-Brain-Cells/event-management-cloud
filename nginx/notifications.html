@@ -8,73 +8,102 @@
 </head>
 <body>
   <main class="main">
-    
+    <h1 class="page-title">Notifications</h1>
+    <p class="page-subtitle">Your alerts, reminders, and updates</p>
+
     <section class="card">
       <div class="card-header">
-        <h2>My Inbox</h2>
-        <button id="refresh-notifs" class="secondary" style="margin: 0; padding: 0.5rem 1rem;">↻ Refresh</button>
+        <h2>Inbox</h2>
+        <div style="display:flex;gap:0.5rem;">
+          <span id="notif-count" class="badge info" style="display:none;"></span>
+          <button id="refresh-notifs" class="secondary" style="margin:0;">Refresh</button>
+        </div>
       </div>
-      
       <div id="notifs-container">
-        <!-- Populated via JS -->
-        <div class="empty-state">Loading your notifications...</div>
+        <div class="empty-state"><span class="empty-state-icon">⏳</span><span class="empty-state-text">Loading notifications...</span></div>
       </div>
     </section>
-
   </main>
 
-  <footer>© 2026 EventHub Cloud-Native Platform</footer>
+  <footer>© 2026 EventHub — Cloud-Native Event Management Platform</footer>
 
   <script type="module">
-    import { apiCall, renderNavbar, getActiveUserId } from './assets/api.js';
-
-    // Inject Navigation
+    import { apiCall, renderNavbar, getActiveUserId, formatRelativeTime, showToast } from './assets/api.js';
     renderNavbar('notifications');
 
     const notifsContainer = document.getElementById('notifs-container');
     const refreshBtn = document.getElementById('refresh-notifs');
+    const notifCount = document.getElementById('notif-count');
+
+    const typeConfig = {
+      registration_confirmed: { icon: '✅', color: 'green', label: 'Registration' },
+      registration_cancelled: { icon: '❌', color: 'red', label: 'Cancellation' },
+      user_registered: { icon: '👤', color: 'blue', label: 'New User' },
+      event_created: { icon: '📅', color: 'purple', label: 'New Event' },
+      reminder: { icon: '🔔', color: 'yellow', label: 'Reminder' },
+      welcome: { icon: '👋', color: 'blue', label: 'Welcome' },
+      payment: { icon: '💳', color: 'green', label: 'Payment' },
+    };
+
+    function getTypeConfig(type) {
+      return typeConfig[type] || { icon: '📌', color: 'purple', label: type || 'Info' };
+    }
 
     async function loadNotifications() {
       const userId = getActiveUserId();
       if (!userId) {
-        notifsContainer.innerHTML = '<div class="empty-state" style="color: var(--warning);">Please select an Active User from the navigation bar.</div>';
+        notifsContainer.innerHTML = '<div class="empty-state"><span class="empty-state-icon">👤</span><span class="empty-state-text">Please select an Active User profile from the navigation bar.</span></div>';
         return;
       }
 
       try {
         const data = await apiCall(`/api/notifications/user/${userId}`);
         const notifs = data.notifications || [];
-        
+
+        if (notifs.length > 0) {
+          notifCount.style.display = 'inline-flex';
+          notifCount.textContent = `${notifs.length} notification${notifs.length > 1 ? 's' : ''}`;
+        } else {
+          notifCount.style.display = 'none';
+        }
+
         notifsContainer.innerHTML = '';
-        
+
         if (notifs.length === 0) {
-          notifsContainer.innerHTML = '<div class="empty-state">Your inbox is empty.</div>';
+          notifsContainer.innerHTML = '<div class="empty-state"><span class="empty-state-icon">🔔</span><span class="empty-state-text">Your inbox is empty. Notifications will appear here when you register for events.</span></div>';
           return;
         }
 
-        notifs.forEach(n => {
+        notifs.forEach((n, idx) => {
+          const tc = getTypeConfig(n.notification_type);
           const item = document.createElement('div');
-          item.className = 'notification-item';
-          
+          item.className = `notification-item ${idx < 3 ? 'unread' : ''}`;
+          item.style.animationDelay = `${idx * 0.05}s`;
+
           item.innerHTML = `
-            <div class="notif-header">
-              <span class="notif-type">${n.notification_type}</span>
-              <span class="notif-time">${new Date(n.created_at).toLocaleString()}</span>
+            <div class="notif-icon" style="background:var(--${tc.color}-dim, var(--primary-dim));">${tc.icon}</div>
+            <div class="notif-body">
+              <div class="notif-header">
+                <span class="notif-title">${n.title || tc.label}</span>
+                <span class="notif-time">${formatRelativeTime(n.created_at)}</span>
+              </div>
+              <div class="notif-message">${n.message}</div>
+              <div style="margin-top:0.3rem;">
+                <span class="badge ${tc.color}" style="font-size:0.65rem;">${tc.label}</span>
+                <span style="font-size:0.7rem;color:var(--muted);margin-left:0.4rem;">${new Date(n.created_at).toLocaleString()}</span>
+              </div>
             </div>
-            <div class="notif-message">${n.message}</div>
           `;
           notifsContainer.appendChild(item);
         });
 
       } catch (err) {
-        console.error(err);
-        notifsContainer.innerHTML = `<div class="empty-state" style="color: var(--danger);">Error: ${err.message}</div>`;
+        notifsContainer.innerHTML = '<div class="empty-state"><span class="empty-state-icon">⚠️</span><span class="empty-state-text">Error loading notifications</span></div>';
+        showToast(err.message, 'error');
       }
     }
 
     refreshBtn.addEventListener('click', loadNotifications);
-    
-    // Initial load
     setTimeout(loadNotifications, 100);
   </script>
 </body>
