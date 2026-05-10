@@ -1,14 +1,9 @@
 #!/bin/bash
-# ─────────────────────────────────────────────────────────────────
-# Event Management System — Environment Manager
-# Usage: ./manage.sh [command] [environment]
-# ─────────────────────────────────────────────────────────────────
-
 set -e
 
 COMPOSE="docker compose"
 BASE="-f docker-compose.yml"
-MONITORING="-f docker-compose.monitoring.yml"   # Prometheus + Grafana + Loki + Promtail
+MONITORING="-f docker-compose.monitoring.yml"
 
 show_help() {
   echo ""
@@ -19,6 +14,7 @@ show_help() {
   echo "  Commands:"
   echo "    up      dev|test|prod   Start environment"
   echo "    down    dev|test|prod   Stop environment"
+  echo "    down-all                Stop all environments"
   echo "    logs    dev|test|prod   Tail logs"
   echo "    build   dev|test|prod   Rebuild images"
   echo "    test                    Run integration tests"
@@ -32,8 +28,12 @@ show_help() {
   echo "    ./manage.sh up dev --monitor     # + Prometheus, Grafana, Loki, Promtail"
   echo "    ./manage.sh up test              # Start test (http://localhost:8081)"
   echo "    ./manage.sh up prod              # Start prod (http://localhost:8082)"
-  echo "    ./manage.sh up dev & ./manage.sh up prod  # Both simultaneously"
+  echo "    ./manage.sh down-all             # Stop everything"
   echo ""
+}
+
+get_project() {
+  echo "event-$1"
 }
 
 get_compose_files() {
@@ -47,9 +47,10 @@ get_compose_files() {
 case "$1" in
   up)
     ENV=${2:-dev}
+    PROJ=$(get_project $ENV)
     FILES=$(get_compose_files $ENV $3)
-    echo "▶  Starting $ENV environment..."
-    $COMPOSE $FILES up --build -d
+    echo "▶  Starting $ENV environment (project: $PROJ)..."
+    $COMPOSE -p "$PROJ" $FILES up --build -d
     echo ""
     echo "✅  $ENV environment running:"
     case $ENV in
@@ -72,43 +73,53 @@ case "$1" in
 
   down)
     ENV=${2:-dev}
-    FILES=$(get_compose_files $ENV $3)
+    PROJ=$(get_project $ENV)
+    FILES=$(get_compose_files $ENV)
     echo "⏹  Stopping $ENV environment..."
-    $COMPOSE $FILES down
+    $COMPOSE -p "$PROJ" $FILES down --remove-orphans
+    ;;
+
+  down-all)
+    echo "⏹  Stopping all environments..."
+    for env in dev test prod; do
+      PROJ=$(get_project $env)
+      FILES=$(get_compose_files $env)
+      $COMPOSE -p "$PROJ" $FILES down --remove-orphans 2>/dev/null || true
+    done
+    echo "✅  All environments stopped"
     ;;
 
   build)
     ENV=${2:-dev}
+    PROJ=$(get_project $ENV)
     FILES=$(get_compose_files $ENV)
     echo "🔨  Building $ENV images..."
-    $COMPOSE $FILES build
+    $COMPOSE -p "$PROJ" $FILES build
     ;;
 
   logs)
     ENV=${2:-dev}
+    PROJ=$(get_project $ENV)
     FILES=$(get_compose_files $ENV)
-    $COMPOSE $FILES logs -f
+    $COMPOSE -p "$PROJ" $FILES logs -f
     ;;
 
   test)
     echo "🧪  Running integration tests..."
-    $COMPOSE $BASE -f docker-compose.test.yml up --build --abort-on-container-exit --exit-code-from test-runner
+    $COMPOSE -p event-test $BASE -f docker-compose.test.yml up --build --abort-on-container-exit --exit-code-from test-runner
     ;;
 
   k8s-up)
     echo "☸️  Deploying to Minikube..."
-    # Build images inside Minikube's Docker daemon
     eval $(minikube docker-env)
     docker build -t event-mgmt/user-service:latest ./services/user-service
     docker build -t event-mgmt/event-service:latest ./services/event-service
     docker build -t event-mgmt/registration-service:latest ./services/registration-service
     docker build -t event-mgmt/notification-service:latest ./services/notification-service
     docker build -t event-mgmt/nginx:latest ./nginx
-    # Apply application manifests
     kubectl apply -f k8s/configmaps/
     kubectl apply -f k8s/deployments/
     kubectl apply -f k8s/services/
-    # Apply monitoring + logging manifests (Loki + Promtail)
     kubectl apply -f k8s/monitoring/
     echo ""
     echo "✅  Deployed to Minikube"
@@ -133,9 +144,11 @@ case "$1" in
 
   clean)
     echo "🧹  Cleaning up all volumes and containers..."
-    $COMPOSE $BASE -f docker-compose.dev.yml down -v --remove-orphans 2>/dev/null || true
-    $COMPOSE $BASE -f docker-compose.test.yml down -v --remove-orphans 2>/dev/null || true
-    $COMPOSE $BASE -f docker-compose.prod.yml down -v --remove-orphans 2>/dev/null || true
+    for env in dev test prod; do
+      PROJ=$(get_project $env)
+      FILES=$(get_compose_files $env)
+      $COMPOSE -p "$PROJ" $FILES down -v --remove-orphans 2>/dev/null || true
+    done
     echo "✅  Cleaned"
     ;;
 
