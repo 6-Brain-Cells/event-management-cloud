@@ -1,5 +1,3 @@
-version: "3.9"
-
 # ─────────────────────────────────────────────
 # PRODUCTION environment
 # Run: docker-compose -f docker-compose.yml -f docker-compose.prod.yml up --build -d
@@ -27,7 +25,14 @@ services:
     command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:-changeme_in_prod}
     volumes:
       - redis_prod_data:/data
-    # No exposed port in prod
+
+  rabbitmq:
+    restart: always
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-eventapp}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-changeme_in_prod}
+    volumes:
+      - rabbitmq_prod_data:/var/lib/rabbitmq
 
   user-service:
     restart: always
@@ -42,6 +47,8 @@ services:
       LOG_LEVEL: warning
       DB_NAME: eventdb_prod
       DB_PASSWORD: ${DB_PASSWORD:-changeme_in_prod}
+      RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:-changeme_in_prod}
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-changeme_in_prod}
 
   event-service:
     restart: always
@@ -56,6 +63,8 @@ services:
       LOG_LEVEL: warning
       DB_NAME: eventdb_prod
       DB_PASSWORD: ${DB_PASSWORD:-changeme_in_prod}
+      RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:-changeme_in_prod}
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-changeme_in_prod}
 
   registration-service:
     restart: always
@@ -69,6 +78,8 @@ services:
       LOG_LEVEL: warning
       DB_NAME: eventdb_prod
       DB_PASSWORD: ${DB_PASSWORD:-changeme_in_prod}
+      RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:-changeme_in_prod}
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-changeme_in_prod}
 
   notification-service:
     restart: always
@@ -82,7 +93,10 @@ services:
       LOG_LEVEL: warning
       DB_NAME: eventdb_prod
       DB_PASSWORD: ${DB_PASSWORD:-changeme_in_prod}
+      RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:-changeme_in_prod}
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-changeme_in_prod}
 
 volumes:
   postgres_prod_data:
   redis_prod_data:
+  rabbitmq_prod_data:

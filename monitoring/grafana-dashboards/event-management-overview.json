@@ -1,0 +1,162 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "links": [],
+  "panels": [
+    {
+      "title": "Service Status",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
+      "targets": [
+        { "expr": "up{job=~\"user-service|event-service|registration-service|notification-service\"}", "legendFormat": "{{job}}", "refId": "A" }
+      ],
+      "fieldConfig": {
+        "defaults": { "mappings": [{ "type": "value", "options": { "1": { "text": "UP", "color": "green" }, "0": { "text": "DOWN", "color": "red" } } }], "thresholds": { "steps": [{ "color": "red", "value": null }, { "color": "green", "value": 1 }] } }
+      }
+    },
+    {
+      "title": "Infrastructure Status",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 0 },
+      "targets": [
+        { "expr": "up{job=~\"postgres|redis|node|prometheus\"}", "legendFormat": "{{job}}", "refId": "A" }
+      ],
+      "fieldConfig": {
+        "defaults": { "mappings": [{ "type": "value", "options": { "1": { "text": "UP", "color": "green" }, "0": { "text": "DOWN", "color": "red" } } }], "thresholds": { "steps": [{ "color": "red", "value": null }, { "color": "green", "value": 1 }] } }
+      }
+    },
+    {
+      "title": "Request Rate (req/s)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
+      "targets": [
+        { "expr": "sum(rate(http_requests_total{job=~\"user-service|event-service|registration-service|notification-service\"}[5m])) by (job, method)", "legendFormat": "{{job}} {{method}}", "refId": "A" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "reqps", "custom": { "fillOpacity": 10 } } }
+    },
+    {
+      "title": "Response Time (p50 / p95 / p99)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
+      "targets": [
+        { "expr": "histogram_quantile(0.5, sum(rate(http_request_duration_seconds_bucket{job=~\".*-service\"}[5m])) by (le, job))", "legendFormat": "{{job}} p50", "refId": "A" },
+        { "expr": "histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket{job=~\".*-service\"}[5m])) by (le, job))", "legendFormat": "{{job}} p95", "refId": "B" },
+        { "expr": "histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket{job=~\".*-service\"}[5m])) by (le, job))", "legendFormat": "{{job}} p99", "refId": "C" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s", "custom": { "fillOpacity": 10 } } }
+    },
+    {
+      "title": "Error Rate (5xx)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 },
+      "targets": [
+        { "expr": "sum(rate(http_requests_total{status=~\"5..\",job=~\".*-service\"}[5m])) by (job)", "legendFormat": "{{job}}", "refId": "A" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "reqps", "color": { "mode": "palette-classic" }, "custom": { "fillOpacity": 20 } }, "overrides": [] }
+    },
+    {
+      "title": "Requests by Status Code",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 12 },
+      "targets": [
+        { "expr": "sum(rate(http_requests_total{job=~\".*-service\"}[5m])) by (status)", "legendFormat": "{{status}}", "refId": "A" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "reqps", "custom": { "fillOpacity": 10 } } }
+    },
+    {
+      "title": "PostgreSQL Connections",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 4, "x": 0, "y": 20 },
+      "targets": [
+        { "expr": "pg_stat_activity_count", "legendFormat": "Active", "refId": "A" },
+        { "expr": "pg_settings_max_connections", "legendFormat": "Max", "refId": "B" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" } }
+    },
+    {
+      "title": "PostgreSQL DB Size",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 4, "x": 4, "y": 20 },
+      "targets": [
+        { "expr": "pg_database_size_bytes{datname=\"eventdb\"}", "legendFormat": "DB Size", "refId": "A" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "bytes", "thresholds": { "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 536870912 }, { "color": "red", "value": 1073741824 }] } } }
+    },
+    {
+      "title": "Redis Connected Clients",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 4, "x": 8, "y": 20 },
+      "targets": [
+        { "expr": "redis_connected_clients", "legendFormat": "Clients", "refId": "A" }
+      ]
+    },
+    {
+      "title": "Redis Memory Usage",
+      "type": "timeseries",
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 20 },
+      "targets": [
+        { "expr": "redis_memory_used_bytes", "legendFormat": "Used", "refId": "A" },
+        { "expr": "redis_memory_max_bytes", "legendFormat": "Max", "refId": "B" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "bytes" } }
+    },
+    {
+      "title": "Redis Commands/sec",
+      "type": "timeseries",
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 20 },
+      "targets": [
+        { "expr": "rate(redis_commands_processed_total[5m])", "legendFormat": "Commands/s", "refId": "A" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops" } }
+    },
+    {
+      "title": "CPU Usage",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 24 },
+      "targets": [
+        { "expr": "rate(node_cpu_seconds_total{mode!=\"idle\"}[5m])", "legendFormat": "{{mode}}", "refId": "A" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "percentunit", "max": 1 } }
+    },
+    {
+      "title": "Memory Usage",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 24 },
+      "targets": [
+        { "expr": "node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes", "legendFormat": "Available %", "refId": "A" },
+        { "expr": "1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)", "legendFormat": "Used %", "refId": "B" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "percentunit", "max": 1 } }
+    },
+    {
+      "title": "Inbound Requests by Endpoint",
+      "type": "table",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 32 },
+      "targets": [
+        { "expr": "sum(http_requests_total{job=~\".*-service\"}) by (job, method, handler)", "format": "table", "instant": true, "refId": "A" }
+      ],
+      "fieldConfig": { "defaults": {}, "overrides": [] }
+    },
+    {
+      "title": "Top Endpoints by Latency",
+      "type": "table",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 32 },
+      "targets": [
+        { "expr": "topk(10, histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket{job=~\".*-service\"}[5m])) by (le, handler)))", "format": "table", "instant": true, "refId": "A" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s" } }
+    }
+  ],
+  "schemaVersion": 38,
+  "style": "dark",
+  "tags": ["event-management", "microservices"],
+  "templating": { "list": [] },
+  "time": { "from": "now-1h", "to": "now" },
+  "timepicker": {},
+  "timezone": "",
+  "title": "Event Management - Overview",
+  "uid": "eventmgmt-overview",
+  "version": 1
+}

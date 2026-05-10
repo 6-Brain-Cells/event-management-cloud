@@ -1,5 +1,3 @@
-version: "3.9"
-
 # ─────────────────────────────────────────────
 # BASE docker-compose.yml  (shared definitions)
 # Override with:
@@ -16,6 +14,10 @@ x-common-env: &common-env
   DB_PASSWORD: postgres
   REDIS_HOST: redis
   REDIS_PORT: "6379"
+  RABBITMQ_HOST: rabbitmq
+  RABBITMQ_PORT: "5672"
+  RABBITMQ_USER: guest
+  RABBITMQ_PASSWORD: guest
 
 x-service-defaults: &service-defaults
   restart: unless-stopped
@@ -25,6 +27,8 @@ x-service-defaults: &service-defaults
     postgres:
       condition: service_healthy
     redis:
+      condition: service_healthy
+    rabbitmq:
       condition: service_healthy
 
 services:
@@ -56,6 +60,21 @@ services:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
       timeout: 5s
+      retries: 5
+
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    networks:
+      - event-network
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 30s
+      timeout: 10s
       retries: 5
 
   # ── Microservices ────────────────────────────
@@ -107,3 +126,4 @@ networks:
 volumes:
   postgres_data:
   redis_data:
+  rabbitmq_data:

@@ -1,5 +1,3 @@
-version: "3.9"
-
 # ─────────────────────────────────────────────
 # DEVELOPMENT environment
 # Run: docker-compose -f docker-compose.yml -f docker-compose.dev.yml up --build
@@ -18,6 +16,11 @@ services:
   redis:
     ports:
       - "6379:6379"  # Exposed for local Redis inspection
+
+  rabbitmq:
+    ports:
+      - "5672:5672"    # AMQP
+      - "15672:15672"  # Management UI
 
   user-service:
     volumes:

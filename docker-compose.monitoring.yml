@@ -1,5 +1,3 @@
-version: "3.9"
-
 # ─────────────────────────────────────────────────────────────────
 # MONITORING + LOGGING STACK (Bonus)
 # Add to any environment:
@@ -117,6 +115,8 @@ services:
     volumes:
       - grafana_data:/var/lib/grafana
       - ./monitoring/grafana-datasources.yml:/etc/grafana/provisioning/datasources/datasources.yml:ro
+      - ./monitoring/grafana-dashboard-providers.yml:/etc/grafana/provisioning/dashboards/dashboard-providers.yml:ro
+      - ./monitoring/grafana-dashboards:/etc/grafana/provisioning/dashboards
     ports:
       - "3000:3000"
     networks:
