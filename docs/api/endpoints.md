@@ -30,7 +30,7 @@ curl -X POST http://localhost:8080/api/users/register \
 | password | string | yes | Hashed with bcrypt (12 rounds) |
 | full_name | string | yes | Max 100 chars |
 
-**Response (200):**
+**Response (201):**
 ```json
 {
   "message": "User registered successfully",
@@ -48,6 +48,10 @@ curl -X POST http://localhost:8080/api/users/register \
 | Status | Detail |
 |--------|--------|
 | 400 | Username or email already exists |
+
+**Side Effects:**
+- Publishes `user.registered` to RabbitMQ → notification-service creates welcome notification
+- Publishes to Redis channel `user_events`
 
 ---
 
@@ -78,6 +82,10 @@ curl -X POST http://localhost:8080/api/users/login \
 | Status | Detail |
 |--------|--------|
 | 401 | Invalid credentials |
+
+**Notes:**
+- Token is stored in Redis with 24h TTL (`token:<hex>`)
+- Password verified using bcrypt
 
 ---
 
@@ -180,6 +188,10 @@ curl -X POST http://localhost:8080/api/events \
 }
 ```
 
+**Side Effects:**
+- Publishes `event.created` to RabbitMQ
+- Publishes to Redis channel `event_events`
+
 ---
 
 ### `GET /api/events`
@@ -280,6 +292,15 @@ curl -X POST http://localhost:8080/api/registrations \
 | 402 | Payment failed |
 | 503 | Event service unavailable |
 
+**Registration Flow:**
+1. `GET /events/{id}` — Verify event exists
+2. `PATCH /events/{id}/increment-registration` — Atomically reserve a spot
+3. `process_payment_mock()` — Process payment
+4. If payment fails → `PATCH /events/{id}/decrement-registration` (compensating transaction)
+5. If payment succeeds → `INSERT INTO registrations`
+6. Generate ticket number (`TKT-{id:04d}-{random}`)
+7. Publish `registration.confirmed` to RabbitMQ
+
 ---
 
 ### `GET /api/registrations`
@@ -318,6 +339,61 @@ curl http://localhost:8080/api/registrations/event/1
 
 ---
 
+### `PATCH /api/registrations/{id}/payment`
+
+Update payment status.
+
+```bash
+curl -X PATCH http://localhost:8080/api/registrations/5/payment \
+  -H "Content-Type: application/json" \
+  -d '{"payment_status": "paid"}'
+```
+
+**Response (200):**
+```json
+{
+  "message": "Payment status updated",
+  "registration": {"id": 5, "payment_status": "paid"}
+}
+```
+
+---
+
+### `POST /api/registrations/{id}/process-payment`
+
+Retry payment processing for an existing registration.
+
+```bash
+curl -X POST http://localhost:8080/api/registrations/5/process-payment \
+  -H "Content-Type: application/json" \
+  -d '{"payment_method": "card", "amount": 49.99, "force_decline": false}'
+```
+
+**Request Body:**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| payment_method | string | yes | `free`, `card`, `credit_card`, `paypal`, `bank_transfer` |
+| amount | float | yes | Payment amount |
+| force_decline | boolean | no | Force payment decline for testing (default: false) |
+
+**Response (200):**
+```json
+{
+  "message": "Payment processed",
+  "payment": {
+    "id": 5,
+    "payment_method": "card",
+    "payment_status": "paid",
+    "payment_reference": "TXN-A1B2C3D4E5F6G7H8",
+    "payment_gateway": "simulated-card",
+    "payment_processed_at": "2026-05-10 19:30:00.123456"
+  }
+}
+```
+
+---
+
 ### `DELETE /api/registrations/{id}`
 
 Cancel a registration (restores event capacity).
@@ -327,6 +403,10 @@ curl -X DELETE http://localhost:8080/api/registrations/5
 ```
 
 **Response (200):** `{"message": "Registration cancelled"}`
+
+**Side Effects:**
+- `PATCH /events/{id}/decrement-registration` on event-service
+- Publishes `registration.cancelled` to RabbitMQ
 
 ---
 
@@ -339,6 +419,12 @@ List notifications for a user.
 ```bash
 curl http://localhost:8080/api/notifications/user/1
 ```
+
+**Query Parameters:**
+
+| Param | Type | Default | Description |
+|-------|------|---------|-------------|
+| unread_only | boolean | false | Only return unread notifications |
 
 **Response (200):**
 ```json
@@ -356,6 +442,18 @@ curl http://localhost:8080/api/notifications/user/1
   ],
   "total": 1
 }
+```
+
+---
+
+### `POST /api/notifications`
+
+Create a single notification.
+
+```bash
+curl -X POST http://localhost:8080/api/notifications \
+  -H "Content-Type: application/json" \
+  -d '{"user_id": 1, "title": "Alert", "message": "Test notification", "notification_type": "info"}'
 ```
 
 ---
@@ -379,24 +477,34 @@ Send notification to multiple users.
 ```bash
 curl -X POST http://localhost:8080/api/notifications/broadcast \
   -H "Content-Type: application/json" \
-  -d '{"user_ids": [1, 2, 3], "title": "System Update", "message": "Maintenance tonight", "notification_type": "info"}'
+  -d '{"user_ids": [1, 2, 3], "title": "System Update", "message": "Maintenance tonight"}'
 ```
 
 ---
 
 ## Health Endpoints
 
-All services expose a health endpoint directly (bypassing nginx):
+### Via nginx gateway
+
+```bash
+curl http://localhost:8080/health                      # gateway
+curl http://localhost:8080/api/users/health             # user-service
+curl http://localhost:8080/api/events/health            # event-service
+curl http://localhost:8080/api/registrations/health     # registration-service
+curl http://localhost:8080/api/notifications/health     # notification-service
+```
+
+Gateway returns: `{"status":"gateway-healthy"}`
+Services return: `{"status":"healthy","service":"<name>"}`
+
+### Direct service access (dev only)
 
 ```bash
 curl http://localhost:8001/health  # user-service
 curl http://localhost:8002/health  # event-service
 curl http://localhost:8003/health  # registration-service
 curl http://localhost:8004/health  # notification-service
-curl http://localhost:8080/health  # nginx gateway
 ```
-
-All return: `{"status": "healthy", "service": "<name>"}` (or `gateway-healthy` for nginx)
 
 ---
 

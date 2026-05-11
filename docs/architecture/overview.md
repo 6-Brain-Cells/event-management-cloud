@@ -114,6 +114,8 @@ Event Service ──publish──► Redis channel: "event_events"
 Registration Service ──publish──► Redis channel: "notification_events"
 ```
 
+Redis is also used for token storage — the user-service stores login tokens with 24h TTL (`token:<hex>`).
+
 ---
 
 ## Data Flow Diagrams
@@ -180,14 +182,14 @@ RabbitMQ Consumer Thread (runs in notification-service)
 │   body: { "event": "user_registered", "user_id": 1, ... }
 │
 ├── Parse message
-├── Determine notification type from routing_key
-│   ├── user.registered → "Welcome!" notification
-│   ├── registration.confirmed → "Registration Confirmed" notification
-│   └── registration.cancelled → "Registration Cancelled" notification
+├── Determine action from event type
+│   ├── user_registered → INSERT notification "Welcome!" (type: info)
+│   ├── event_created → Log to console (no DB notification)
+│   ├── registration_confirmed → INSERT notification "Registration Confirmed" (type: confirmation)
+│   └── registration_cancelled → Log to console (no DB notification)
 │
-├── INSERT INTO notifications (user_id, title, message, type)
-│
-└── Ack message
+├── On success → basic_ack (message removed from queue)
+└── On failure → basic_nack with requeue=True (message retried)
 ```
 
 ---
@@ -266,9 +268,11 @@ All containers share the `event-network` bridge network. Services reference each
 | `postgres_data` | Database files | Survives restarts |
 | `redis_data` | Redis append-only file | Survives restarts |
 | `rabbitmq_data` | RabbitMQ state | Survives restarts |
-| `prometheus_data` | Metrics storage | Survives restarts |
+| `prometheus_data` | Metrics storage (15s interval) | Survives restarts |
 | `grafana_data` | Dashboard config | Survives restarts |
 | `loki_data` | Log storage | Survives restarts |
+
+Production uses separate volumes: `postgres_prod_data`, `redis_prod_data`, `rabbitmq_prod_data`.
 
 ---
 

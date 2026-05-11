@@ -61,11 +61,30 @@ Create a single notification.
 }
 ```
 
+**Response (200):**
+```json
+{
+  "message": "Notification sent",
+  "notification": {
+    "id": 1,
+    "user_id": 1,
+    "title": "Welcome!",
+    "message": "Welcome Alice! Your account has been created.",
+    "notification_type": "info",
+    "is_read": false,
+    "created_at": "2026-05-10 18:15:57.788032"
+  }
+}
+```
+
 ---
 
 ### `GET /notifications/user/{user_id}`
 
 List all notifications for a user.
+
+**Query Parameters:**
+- `unread_only` (optional, boolean, default: false) — Only return unread notifications
 
 **Response (200):**
 ```json
@@ -96,6 +115,9 @@ Mark a notification as read.
 {"message": "Marked as read"}
 ```
 
+**Errors:**
+- `404` — Notification not found
+
 ---
 
 ### `POST /notifications/broadcast`
@@ -107,12 +129,16 @@ Send the same notification to multiple users using a single bulk INSERT query.
 {
   "user_ids": [1, 2, 3],
   "title": "System Update",
-  "message": "Maintenance scheduled for tonight",
-  "notification_type": "info"
+  "message": "Maintenance scheduled for tonight"
 }
 ```
 
-**Performance:** Uses `psycopg2.extras.execute_values` (mogrify) for a single INSERT instead of N individual queries.
+**Response (200):**
+```json
+{"message": "Broadcast sent to 3 users"}
+```
+
+**Performance:** Uses `psycopg2` `cur.mogrify()` for efficient batch INSERT instead of N individual queries.
 
 ---
 
@@ -126,7 +152,7 @@ Send the same notification to multiple users using a single bulk INSERT query.
 
 ## RabbitMQ Consumer
 
-The notification service runs a background thread that consumes messages from `notification_queue`.
+The notification service runs a background daemon thread that consumes messages from `notification_queue`.
 
 ### Queue Configuration
 
@@ -138,30 +164,41 @@ Bindings:
   - event.created
   - registration.confirmed
   - registration.cancelled
+Prefetch: 10 messages
 ```
 
 ### Message Processing
 
-| Routing Key | Notification Title | Type |
-|-------------|-------------------|------|
-| `user.registered` | "Welcome!" | `info` |
-| `event.created` | (no notification created) | — |
-| `registration.confirmed` | "Registration Confirmed" | `confirmation` |
-| `registration.cancelled` | "Registration Cancelled" | `info` |
+| Routing Key | Event Type | Action | Notification Type |
+|-------------|-----------|--------|-------------------|
+| `user.registered` | `user_registered` | Creates "Welcome!" notification for the user | `info` |
+| `event.created` | `event_created` | Logs event title to console (no DB notification) | — |
+| `registration.confirmed` | `registration_confirmed` | Creates "Registration Confirmed" notification with ticket number | `confirmation` |
+| `registration.cancelled` | `registration_cancelled` | Logs cancellation to console (no DB notification) | — |
+
+### Message Acknowledgment
+
+- **Success:** `basic_ack` after processing — message is removed from queue
+- **Failure:** `basic_nack` with `requeue=True` — message goes back to queue for retry
+- This ensures no notifications are lost if the service crashes mid-processing
 
 ### Consumer Thread
 
 ```python
-def _consume_rabbitmq():
-    params = pika.ConnectionParameters(...)
-    connection = pika.BlockingConnection(params)
-    channel = connection.channel()
-    channel.exchange_declare(exchange="events", exchange_type="topic", durable=True)
-    channel.queue_declare(queue="notification_queue", durable=True)
+def rabbitmq_consumer():
+    params = pika.ConnectionParameters(
+        heartbeat=600,
+        blocked_connection_timeout=300,
+    )
+    conn = pika.BlockingConnection(params)
+    ch = conn.channel()
+    ch.exchange_declare(exchange="events", exchange_type="topic", durable=True)
+    result = ch.queue_declare(queue="notification_queue", durable=True)
     for key in ["user.registered", "event.created", "registration.confirmed", "registration.cancelled"]:
-        channel.queue_bind(queue="notification_queue", exchange="events", routing_key=key)
-    channel.basic_consume(queue="notification_queue", on_message_callback=_on_message, auto_ack=False)
-    channel.start_consuming()
+        ch.queue_bind(exchange="events", queue=result.method.queue, routing_key=key)
+    ch.basic_qos(prefetch_count=10)
+    ch.basic_consume(queue=queue_name, on_message_callback=callback)
+    ch.start_consuming()
 ```
 
 The consumer runs in a daemon thread started during the FastAPI `startup` event.

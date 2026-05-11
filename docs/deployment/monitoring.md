@@ -116,6 +116,8 @@ Log shipper. Discovers Docker containers, reads their logs, and ships to Loki.
 
 **Discovery:** Uses Docker socket (`/var/run/docker.sock`) to find running containers and their labels.
 
+**Windows note:** On Windows with Docker Desktop, the `/var/lib/docker/containers` path may not be accessible. Promtail will run but may not collect container logs. Loki itself is fully functional for manual log pushes.
+
 ---
 
 ### Exporters

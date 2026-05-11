@@ -599,17 +599,28 @@ Each service uses `psycopg2.pool.ThreadedConnectionPool(minconn=2, maxconn=10)` 
 ## Management Script
 
 ```bash
-./manage.sh [command]
+./manage.sh <command> [env] [--monitor]
 
 Commands:
-  dev       Start development environment
-  test      Run integration tests
-  prod      Start production environment
-  down      Stop all environments
-  clean     Remove all containers, volumes, and images
-  logs      Tail logs from all services
-  health    Check health of all services
+  up dev|test|prod       Start environment
+  down dev|test|prod     Stop environment
+  down-all               Stop all environments simultaneously
+  logs dev|test|prod     Tail logs
+  build dev|test|prod    Rebuild images
+  test                   Run integration tests
+  k8s-up                 Deploy to Minikube
+  k8s-down               Remove from Minikube
+  status                 Show running containers
+  clean                  Remove all volumes and containers
+
+Examples:
+  ./manage.sh up dev               # Start dev (http://localhost:8080)
+  ./manage.sh up dev --monitor     # + Prometheus, Grafana, Loki, Promtail
+  ./manage.sh up prod              # Start prod (http://localhost:8082)
+  ./manage.sh down-all             # Stop everything
 ```
+
+Each environment uses a unique project name (`event-dev`, `event-test`, `event-prod`) so multiple environments can run simultaneously without container conflicts.
 
 ---
 
