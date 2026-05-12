@@ -11,16 +11,16 @@ services:
 
   postgres:
     ports:
-      - "5432:5432"  # Exposed for local DB tools (DBeaver, psql)
+      - "15432:5432"  # Exposed for local DB tools (DBeaver, psql)
 
   redis:
     ports:
-      - "6379:6379"  # Exposed for local Redis inspection
+      - "16379:6379"  # Exposed for local Redis inspection
 
   rabbitmq:
     ports:
-      - "5672:5672"    # AMQP
-      - "15672:15672"  # Management UI
+      - "35672:5672"    # AMQP
+      - "45672:15672"  # Management UI
 
   user-service:
     volumes:
