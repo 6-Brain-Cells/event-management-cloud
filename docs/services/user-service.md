@@ -10,6 +10,7 @@ Manages user accounts: registration, authentication, profile retrieval, and soft
 | **Framework** | FastAPI |
 | **Database Table** | `users` |
 | **RabbitMQ Publishing** | `user.registered` |
+| **Auth** | JWT (PyJWT, HS256, 24h expiry, RBAC with role claims) |
 | **Dockerfile** | Multi-stage `python:3.11-slim` |
 
 ---
@@ -35,7 +36,8 @@ CREATE TABLE IF NOT EXISTS users (
     password_hash VARCHAR(200) NOT NULL,
     full_name VARCHAR(100),
     created_at TIMESTAMP DEFAULT NOW(),
-    is_active BOOLEAN DEFAULT TRUE
+    is_active BOOLEAN DEFAULT TRUE,
+    role VARCHAR(20) DEFAULT 'attendee'
 );
 
 CREATE INDEX IF NOT EXISTS idx_users_email ON users(email) WHERE is_active=TRUE;
@@ -49,13 +51,21 @@ CREATE INDEX IF NOT EXISTS idx_users_email ON users(email) WHERE is_active=TRUE;
 
 Register a new user.
 
+**Input Validation:**
+- `username`: 3-50 chars, alphanumeric + underscore
+- `email`: valid email format (regex)
+- `password`: 8-128 chars
+- `full_name`: 1-100 chars
+- `role`: one of `super_admin`, `organizer`, `attendee` (default: `attendee`)
+
 **Request Body:**
 ```json
 {
   "username": "alice",
   "email": "alice@test.com",
   "password": "Password123",
-  "full_name": "Alice Smith"
+  "full_name": "Alice Smith",
+  "role": "attendee"
 }
 ```
 
@@ -68,6 +78,7 @@ Register a new user.
     "username": "alice",
     "email": "alice@test.com",
     "full_name": "Alice Smith",
+    "role": "attendee",
     "created_at": "2026-05-10 18:15:57.750469"
   }
 }
@@ -84,7 +95,7 @@ Register a new user.
 
 ### `POST /users/login`
 
-Authenticate and receive a token.
+Authenticate and receive a JWT token.
 
 **Request Body:**
 ```json
@@ -97,7 +108,7 @@ Authenticate and receive a token.
 **Response (200):**
 ```json
 {
-  "token": "b844eb974af8731d...",
+  "token": "eyJhbGciOiJIUzI1NiIs...",
   "user": {
     "id": 1,
     "username": "alice",
@@ -111,7 +122,8 @@ Authenticate and receive a token.
 - `401` — Invalid credentials
 
 **Notes:**
-- Token is stored in Redis with 24h TTL (`token:<hex>`)
+- Returns a JWT token (HS256, 24h expiry) with `user_id` and `role` claims
+- Token stored in Redis as `session:<jwt>` with 24h TTL
 - Password verified using bcrypt
 
 ---
@@ -119,6 +131,8 @@ Authenticate and receive a token.
 ### `GET /users`
 
 List all active users.
+
+**Requires:** Bearer token (any authenticated user)
 
 **Response (200):**
 ```json
@@ -135,6 +149,8 @@ List all active users.
 ### `GET /users/{user_id}`
 
 Get a specific user by ID.
+
+**Requires:** Bearer token (any authenticated user)
 
 **Response (200):**
 ```json
@@ -154,7 +170,9 @@ Get a specific user by ID.
 
 ### `DELETE /users/{user_id}`
 
-Soft-delete a user (sets `is_active=FALSE`).
+Soft-delete a user (sets `is_active=FALSE`). Self-deletion allowed. super_admin can delete any user.
+
+**Requires:** Bearer token (own user or super_admin)
 
 **Response (200):**
 ```json
@@ -174,6 +192,57 @@ Soft-delete a user (sets `is_active=FALSE`).
 
 ---
 
+### `GET /users/me`
+
+Returns the current user's profile derived from the JWT token.
+
+**Requires:** Bearer token (any authenticated user)
+
+**Response (200):**
+```json
+{
+  "id": 1,
+  "username": "alice",
+  "email": "alice@test.com",
+  "full_name": "Alice Smith",
+  "role": "attendee",
+  "created_at": "2026-05-10 18:15:57.750469"
+}
+```
+
+---
+
+### `PUT /users/{user_id}/role`
+
+Update a user's role. super_admin only.
+
+**Requires:** Bearer token (super_admin)
+
+**Request Body:**
+```json
+{
+  "role": "organizer"
+}
+```
+
+**Response (200):**
+```json
+{
+  "message": "Role updated",
+  "user": {
+    "id": 1,
+    "username": "alice",
+    "role": "organizer"
+  }
+}
+```
+
+**Errors:**
+- `403` — Not a super_admin
+- `400` — Invalid role (must be super_admin/organizer/attendee)
+
+---
+
 ## Dependencies
 
 ```
@@ -183,5 +252,6 @@ psycopg2-binary
 redis
 pika
 bcrypt
+PyJWT>=2.8.0
 prometheus-fastapi-instrumentator
 ```

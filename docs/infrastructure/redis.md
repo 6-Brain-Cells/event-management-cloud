@@ -19,12 +19,14 @@ Redis serves as a secondary pub-sub channel and token cache for the event manage
 
 ### Token Storage (user-service)
 
-After login, the user-service stores the token in Redis with a 24-hour TTL:
+After login, the user-service stores the JWT token in Redis with a 24-hour TTL:
 
 ```python
 r = get_redis()
-r.setex(f"token:{token}", 86400, json.dumps(dict(user)))
+r.setex(f"session:{token}", 86400, json.dumps(dict(user)))
 ```
+
+Note: Key prefix changed from `token:` to `session:`, and the token is now a JWT (not random hex).
 
 ### Pub-Sub Publishing
 

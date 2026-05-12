@@ -54,9 +54,9 @@ A microservices-based event management platform demonstrating containerization, 
                   ▼                        ▼                            ▼
           ┌──────────────┐        ┌──────────────┐             ┌──────────────┐
           │  PostgreSQL   │        │    Redis      │             │   RabbitMQ   │
-          │  (Primary DB) │        │  (Cache/      │             │  (Message    │
-          │  Port 5432    │        │   Pub-Sub)    │             │   Broker)    │
-          │               │        │  Port 6379    │             │  5672/15672  │
+           │  (Primary DB) │        │  (Cache/      │             │  (Message    │
+           │  Port 5432    │        │   Pub-Sub)    │             │   Broker)    │
+           │               │        │  Port 6379    │             │  5672/15672  │
           └──────────────┘        └──────────────┘             └──────────────┘
 ```
 
@@ -68,6 +68,7 @@ A microservices-based event management platform demonstrating containerization, 
 | **Async fire-and-forget** | RabbitMQ (topic exchange) | User service publishes `user.registered` → notification-service consumes |
 | **Cache/Pub-Sub** | Redis | Services publish to Redis channels as secondary notification path |
 | **API Gateway** | Nginx | All external traffic routes through nginx with rate limiting |
+| **Service-to-service** | X-Service-Key header | Registration service authenticates to event-service for capacity operations |
 
 ### Design Decisions
 
@@ -79,6 +80,11 @@ A microservices-based event management platform demonstrating containerization, 
 | Payment processing | Mock gateway with 5% random decline | Simulates real payment failures for testing |
 | Capacity management | Increment-then-pay with compensating decrement | Prevents race conditions in concurrent registrations |
 | Notification delivery | RabbitMQ consumer only (no Redis subscriber) | Prevents duplicate notifications from dual sources |
+| Authentication | JWT (PyJWT, HS256, 24h expiry) | Stateless auth with role claims, Redis session store |
+| Authorization | RBAC with 3 roles (super_admin, organizer, attendee) | Role-based access control enforced per endpoint |
+| Input validation | Pydantic field validators | Username, email, password, role validation at API layer |
+| CORS | Origin whitelist via CORS_ORIGINS env var | Restrict cross-origin access to known frontend hosts |
+| Service-to-service auth | X-Service-Key header | Internal services authenticate to each other via shared key |
 
 ---
 
@@ -86,45 +92,47 @@ A microservices-based event management platform demonstrating containerization, 
 
 ### User Service (`services/user-service/`)
 
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/users/register` | POST | Register new user (bcrypt hashing) |
-| `/users/login` | POST | Authenticate, return token |
-| `/users` | GET | List all active users |
-| `/users/{id}` | GET | Get user by ID |
-| `/users/{id}` | DELETE | Soft-delete (is_active=FALSE) |
-| `/health` | GET | Service health check |
+| Endpoint | Method | Auth | Description |
+|----------|--------|------|-------------|
+| `/users/register` | POST | Public | Register new user with role (bcrypt hashing) |
+| `/users/login` | POST | Public | Authenticate, return JWT token |
+| `/users` | GET | Any user | List all active users |
+| `/users/me` | GET | Any user | Get current user profile from JWT |
+| `/users/{id}` | GET | Any user | Get user by ID |
+| `/users/{id}/role` | PUT | super_admin | Update user role |
+| `/users/{id}` | DELETE | Self or super_admin | Soft-delete (is_active=FALSE) |
+| `/health` | GET | Public | Service health check |
 
 **Publishes:** `user.registered` to RabbitMQ
 
 ### Event Service (`services/event-service/`)
 
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/events` | POST | Create event |
-| `/events` | GET | List events (filter by type, status) |
-| `/events/{id}` | GET | Get event by ID |
-| `/events/{id}` | PUT | Update event fields |
-| `/events/{id}` | DELETE | Cancel event (status=cancelled) |
-| `/events/{id}/increment-registration` | PATCH | Atomically increment registered_count (with capacity check) |
-| `/events/{id}/decrement-registration` | PATCH | Atomically decrement registered_count (compensating transaction) |
-| `/health` | GET | Service health check |
+| Endpoint | Method | Auth | Description |
+|----------|--------|------|-------------|
+| `/events` | POST | organizer, super_admin | Create event |
+| `/events` | GET | Any user or service | List events (filter by type, status) |
+| `/events/{id}` | GET | Any user or service | Get event by ID |
+| `/events/{id}` | PUT | organizer (own), super_admin | Update event fields |
+| `/events/{id}` | DELETE | organizer (own), super_admin | Cancel event |
+| `/events/{id}/increment-registration` | PATCH | Service key or super_admin | Atomically increment registered_count |
+| `/events/{id}/decrement-registration` | PATCH | Service key or super_admin | Atomically decrement registered_count |
+| `/health` | GET | Public | Service health check |
 
 **Publishes:** `event.created` to RabbitMQ
 
 ### Registration Service (`services/registration-service/`)
 
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/registrations` | POST | Register for event (payment processing, capacity check) |
-| `/registrations` | GET | List all registrations |
-| `/registrations/{id}` | GET | Get registration by ID |
-| `/registrations/user/{user_id}` | GET | List registrations by user |
-| `/registrations/event/{event_id}` | GET | List confirmed registrations by event |
-| `/registrations/{id}/payment` | PATCH | Update payment status |
-| `/registrations/{id}/process-payment` | POST | Retry payment processing |
-| `/registrations/{id}` | DELETE | Cancel registration (decrements event capacity) |
-| `/health` | GET | Service health check |
+| Endpoint | Method | Auth | Description |
+|----------|--------|------|-------------|
+| `/registrations` | POST | attendee, organizer, super_admin | Register for event (user_id from JWT) |
+| `/registrations` | GET | Any user (own only; super_admin sees all) | List registrations |
+| `/registrations/{id}` | GET | Own user or super_admin | Get registration by ID |
+| `/registrations/user/{user_id}` | GET | Own user or super_admin | List registrations by user |
+| `/registrations/event/{event_id}` | GET | Any user | List confirmed registrations by event |
+| `/registrations/{id}/payment` | PATCH | super_admin | Update payment status |
+| `/registrations/{id}/process-payment` | POST | Own user or super_admin | Retry payment processing |
+| `/registrations/{id}` | DELETE | Own user or super_admin | Cancel registration |
+| `/health` | GET | Public | Service health check |
 
 **Publishes:** `registration.confirmed`, `registration.cancelled` to RabbitMQ
 
@@ -132,13 +140,13 @@ A microservices-based event management platform demonstrating containerization, 
 
 ### Notification Service (`services/notification-service/`)
 
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/notifications` | POST | Create notification |
-| `/notifications/user/{user_id}` | GET | List notifications by user |
-| `/notifications/{id}/read` | PATCH | Mark notification as read |
-| `/notifications/broadcast` | POST | Send notification to multiple users (bulk INSERT) |
-| `/health` | GET | Service health check |
+| Endpoint | Method | Auth | Description |
+|----------|--------|------|-------------|
+| `/notifications` | POST | super_admin | Create notification |
+| `/notifications/user/{user_id}` | GET | Own user or super_admin | List notifications by user |
+| `/notifications/{id}/read` | PATCH | Own user or super_admin | Mark notification as read |
+| `/notifications/broadcast` | POST | super_admin | Send notification to multiple users |
+| `/health` | GET | Public | Service health check |
 
 **Consumes:** All routing keys from `events` exchange via `notification_queue` (RabbitMQ consumer thread)
 
@@ -161,6 +169,7 @@ A microservices-based event management platform demonstrating containerization, 
 | **HTTP Client** | httpx | Latest | Inter-service communication |
 | **Password** | bcrypt | Latest | Secure password hashing |
 | **Messaging** | pika | Latest | RabbitMQ client |
+| **Auth** | PyJWT | 2.8.0+ | JWT token generation and validation (HS256) |
 | **Metrics** | prometheus-fastapi-instrumentator | Latest | Auto-instrument HTTP metrics |
 | **Containerization** | Docker | — | Multi-stage builds |
 | **Orchestration** | Kubernetes (Minikube) | — | Production deployment |
@@ -272,7 +281,7 @@ event-management-cloud/
 
 Contains four independent FastAPI microservices. Each service has its own Dockerfile, requirements.txt, and .dockerignore. Services are independently deployable and scale horizontally.
 
-- **Shared patterns across all services:** DB connection pooling (`ThreadedConnectionPool`), Redis singleton, RabbitMQ publisher, Prometheus instrumentation, CORS middleware, health endpoint, auto-creating DB schema on startup
+- **Shared patterns across all services:** DB connection pooling (`ThreadedConnectionPool`), Redis singleton, RabbitMQ publisher, Prometheus instrumentation, CORS middleware (origin whitelist), JWT authentication, RBAC role checking, Pydantic input validation, health endpoint, auto-creating DB schema on startup
 - **Each service owns its own table** but shares the same PostgreSQL database
 
 ### `nginx/`
@@ -347,35 +356,41 @@ docker compose -f docker-compose.yml \
 | Notification Service | http://localhost:8004 | — |
 | Prometheus | http://localhost:9090 | — |
 | Grafana | http://localhost:3000 | admin / admin |
-| RabbitMQ Management | http://localhost:15672 | guest / guest |
-| PostgreSQL | localhost:5432 | postgres / postgres |
-| Redis | localhost:6379 | — |
+| RabbitMQ Management | http://localhost:45672 | guest / guest |
+| PostgreSQL | localhost:15432 | postgres / postgres |
+| Redis | localhost:16379 | — |
 
 ### Quick API Test
 
 ```bash
-# Register a user
+# Register an organizer
 curl -X POST http://localhost:8080/api/users/register \
   -H "Content-Type: application/json" \
-  -d '{"username":"alice","email":"alice@test.com","password":"Password123","full_name":"Alice"}'
+  -d '{"username":"alice","email":"alice@test.com","password":"Password123","full_name":"Alice","role":"organizer"}'
 
-# Login
+# Login (returns JWT token)
 curl -X POST http://localhost:8080/api/users/login \
   -H "Content-Type: application/json" \
   -d '{"email":"alice@test.com","password":"Password123"}'
 
-# Create an event
+# Save the token from login response, then:
+TOKEN="eyJ..."
+
+# Create an event (requires organizer or super_admin role)
 curl -X POST http://localhost:8080/api/events \
   -H "Content-Type: application/json" \
-  -d '{"title":"Tech Summit","description":"Annual conference","event_type":"conference","start_date":"2026-07-01 09:00:00","end_date":"2026-07-03 18:00:00","location":"Convention Center","max_capacity":200,"organizer_id":1,"ticket_price":49.99}'
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{"title":"Tech Summit","description":"Annual conference","event_type":"conference","start_date":"2026-07-01 09:00:00","end_date":"2026-07-03 18:00:00","location":"Convention Center","max_capacity":200,"ticket_price":49.99}'
 
-# Register for event
+# Register for event (user_id derived from JWT token)
 curl -X POST http://localhost:8080/api/registrations \
   -H "Content-Type: application/json" \
-  -d '{"user_id":1,"event_id":1,"payment_method":"card"}'
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{"event_id":1,"payment_method":"card"}'
 
-# View notifications
-curl http://localhost:8080/api/notifications/user/1
+# View notifications (scoped to own user)
+curl http://localhost:8080/api/notifications/user/1 \
+  -H "Authorization: Bearer $TOKEN"
 ```
 
 ---
@@ -565,6 +580,11 @@ docker compose -f docker-compose.yml -f docker-compose.test.yml up --build test-
 - Registration with payment processing (success/failure)
 - Notification delivery verification
 - Cross-service communication via RabbitMQ
+- JWT authentication: login returns valid token, expired/invalid tokens rejected
+- RBAC: attendee cannot create events, organizer can CRUD own events, super_admin has full access
+- Input validation: username format, email format, password length, valid roles
+- Ownership scoping: users can only access their own data, organizers can only modify their own events
+- Service-to-service authentication via X-Service-Key
 
 ---
 
@@ -574,7 +594,7 @@ docker compose -f docker-compose.yml -f docker-compose.test.yml up --build test-
 
 | Table | Service | Columns |
 |-------|---------|---------|
-| `users` | user-service | id, username, email, password_hash, full_name, created_at, is_active |
+| `users` | user-service | id, username, email, password_hash, full_name, **role**, created_at, is_active |
 | `events` | event-service | id, title, description, event_type, start_date, end_date, location, max_capacity, registered_count, organizer_id, ticket_price, status, created_at |
 | `registrations` | registration-service | id, user_id, event_id, registration_date, status, payment_method, payment_status, payment_reference, payment_gateway, payment_processed_at, ticket_number, notes |
 | `notifications` | notification-service | id, user_id, title, message, notification_type, is_read, created_at |
@@ -586,6 +606,7 @@ docker compose -f docker-compose.yml -f docker-compose.test.yml up --build test-
 | `users` | `idx_users_email` | Fast email lookup (WHERE is_active=TRUE) |
 | `events` | `idx_events_status_type` | Filter by status + event_type |
 | `events` | `idx_events_start_date` | Sort by date |
+| `events` | `idx_events_organizer` | Lookup events by organizer (ownership scoping) |
 | `registrations` | `idx_reg_user` | User's registrations |
 | `registrations` | `idx_reg_event_status` | Event attendees |
 | `notifications` | `idx_notifications_user_read` | User's notifications with read filter |

@@ -11,6 +11,7 @@ Manages events: creation, retrieval, updates, cancellation, and capacity trackin
 | **Database Table** | `events` |
 | **RabbitMQ Publishing** | `event.created` |
 | **Dockerfile** | Multi-stage `python:3.11-slim` |
+| **Auth** | JWT + X-Service-Key for inter-service calls |
 
 ---
 
@@ -46,7 +47,22 @@ CREATE TABLE IF NOT EXISTS events (
 
 CREATE INDEX IF NOT EXISTS idx_events_status_type ON events(status, event_type);
 CREATE INDEX IF NOT EXISTS idx_events_start_date ON events(start_date);
+CREATE INDEX IF NOT EXISTS idx_events_organizer ON events(organizer_id);
 ```
+
+---
+
+## Authentication & Authorization
+
+| Endpoint Group | Required Role | Notes |
+|---------------|---------------|-------|
+| `POST /events` | organizer, super_admin | Super admins can specify organizer_id |
+| `GET /events` | Any authenticated user or service (X-Service-Key) | Super admins can use status=all |
+| `GET /events/{id}` | Any authenticated user or service (X-Service-Key) | — |
+| `PUT /events/{id}` | organizer (own events only), super_admin | Ownership verified |
+| `DELETE /events/{id}` | organizer (own events only), super_admin | Ownership verified |
+| `PATCH /events/{id}/increment-registration` | Service key (X-Service-Key) or super_admin | Internal use by registration-service |
+| `PATCH /events/{id}/decrement-registration` | Service key (X-Service-Key) or super_admin | Internal use by registration-service |
 
 ---
 
@@ -54,7 +70,9 @@ CREATE INDEX IF NOT EXISTS idx_events_start_date ON events(start_date);
 
 ### `POST /events`
 
-Create a new event.
+Create a new event. `organizer_id` defaults to JWT `user_id` unless super_admin specifies it.
+
+**Requires:** Bearer token (organizer or super_admin)
 
 **Request Body:**
 ```json
@@ -131,7 +149,9 @@ Get event by ID.
 
 ### `PUT /events/{event_id}`
 
-Update event fields.
+Update event fields. Organizers can only update their own events; super_admin can update any.
+
+**Requires:** Bearer token (organizer — own events only, or super_admin)
 
 **Request Body:**
 ```json
@@ -146,7 +166,9 @@ Update event fields.
 
 ### `PATCH /events/{event_id}/increment-registration`
 
-Atomically increment `registered_count`. Fails if event is full.
+Atomically increment `registered_count`. Fails if event is full. Requires X-Service-Key or super_admin.
+
+**Requires:** X-Service-Key header or Bearer token (super_admin)
 
 **Response (200):**
 ```json
@@ -162,7 +184,9 @@ Atomically increment `registered_count`. Fails if event is full.
 
 ### `PATCH /events/{event_id}/decrement-registration`
 
-Atomically decrement `registered_count` (floor at 0). Used as a compensating transaction when registration fails.
+Atomically decrement `registered_count` (floor at 0). Used as a compensating transaction when registration fails. Requires X-Service-Key or super_admin.
+
+**Requires:** X-Service-Key header or Bearer token (super_admin)
 
 **Response (200):**
 ```json
@@ -173,7 +197,9 @@ Atomically decrement `registered_count` (floor at 0). Used as a compensating tra
 
 ### `DELETE /events/{event_id}`
 
-Cancel event (sets `status='cancelled'`).
+Cancel event (sets `status='cancelled'`). Organizers can only cancel their own events; super_admin can cancel any.
+
+**Requires:** Bearer token (organizer — own events only, or super_admin)
 
 ---
 
@@ -213,5 +239,6 @@ uvicorn[standard]
 psycopg2-binary
 redis
 pika
+PyJWT>=2.8.0
 prometheus-fastapi-instrumentator
 ```

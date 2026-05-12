@@ -26,6 +26,8 @@ Each service is a standalone FastAPI application running in its own Docker conta
 4. **API Gateway pattern** — nginx routes all external traffic, enforces rate limits
 5. **Connection pooling** — `ThreadedConnectionPool(2-10)` per service for DB efficiency
 6. **Graceful degradation** — Redis/RabbitMQ failures are caught silently; core functionality continues
+7. **JWT-based RBAC** — All endpoints (except register/login/health) require Bearer token; roles (super_admin, organizer, attendee) enforced per endpoint
+8. **Input validation** — Pydantic field validators sanitize all user inputs at the API layer
 
 ---
 
@@ -78,7 +80,7 @@ Each service is a standalone FastAPI application running in its own Docker conta
 
 ### Synchronous (HTTP via httpx)
 
-Used when the caller needs an immediate response to proceed.
+Used when the caller needs an immediate response to proceed. Inter-service HTTP calls include `X-Service-Key` header for authentication.
 
 ```
 Registration Service ──GET /events/{id}──► Event Service
@@ -114,7 +116,7 @@ Event Service ──publish──► Redis channel: "event_events"
 Registration Service ──publish──► Redis channel: "notification_events"
 ```
 
-Redis is also used for token storage — the user-service stores login tokens with 24h TTL (`token:<hex>`).
+Redis is also used for JWT session storage — the user-service stores JWT sessions with 24h TTL (`session:<jwt>`).
 
 ---
 
@@ -222,10 +224,15 @@ All services expose `GET /metrics` via `prometheus_fastapi_instrumentator`. Metr
 
 ### Security
 
+- **Authentication:** JWT tokens (PyJWT, HS256, 24h expiry) with role claims; Bearer token required on all endpoints except register/login/health
+- **Authorization:** RBAC with 3 roles — `super_admin` (full access), `organizer` (manage own events), `attendee` (register, view)
+- **Ownership scoping:** Organizers can only modify their own events; users can only access their own registrations and notifications
+- **Service-to-service auth:** Internal calls use `X-Service-Key` header (e.g., registration-service → event-service)
 - **Password hashing:** bcrypt with 12 rounds
 - **Rate limiting:** nginx enforces 5 req/s on auth, 30 req/s on API
+- **CORS:** Origin whitelist via `CORS_ORIGINS` environment variable (no more wildcard `*`)
+- **Input validation:** Pydantic field validators enforce username format, email format, password length (8-128), valid roles, capacity/price bounds
 - **Soft deletes:** Users are deactivated (`is_active=FALSE`), never hard-deleted
-- **CORS:** All origins allowed (development config; restrict in production)
 - **Secrets:** Production credentials via environment variables, not hardcoded
 
 ---
@@ -290,5 +297,6 @@ Production uses separate volumes: `postgres_prod_data`, `redis_prod_data`, `rabb
 | **Logging** | Loki + Promtail | Centralized log aggregation |
 | **Containerization** | Docker | Multi-stage builds |
 | **Orchestration** | Docker Compose / Kubernetes | Multi-environment deployment |
+| **Authentication** | PyJWT | JWT token generation, validation, RBAC |
 | **CI/CD** | GitHub Actions | Automated build + test |
 | **Language** | Python 3.11 | Runtime for all services |

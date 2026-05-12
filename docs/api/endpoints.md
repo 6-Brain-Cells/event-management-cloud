@@ -2,6 +2,26 @@
 
 All endpoints are accessed through the nginx gateway at `http://localhost:8080/api/`.
 
+## Authentication
+
+All endpoints (except register, login, and health) require a JWT Bearer token in the `Authorization` header:
+
+```
+Authorization: Bearer eyJhbGciOiJIUzI1NiIs...
+```
+
+### Roles
+
+| Role | Capabilities |
+|------|-------------|
+| `super_admin` | Full access: manage all users, events, registrations, notifications; assign roles |
+| `organizer` | Create/update/cancel own events; register for events; view own data |
+| `attendee` | Register for events; view own registrations and notifications |
+
+### Service-to-Service Auth
+
+Internal service calls (e.g., registration-service → event-service) use the `X-Service-Key` header instead of JWT.
+
 ---
 
 ## User Service
@@ -17,7 +37,8 @@ curl -X POST http://localhost:8080/api/users/register \
     "username": "alice",
     "email": "alice@test.com",
     "password": "Password123",
-    "full_name": "Alice Smith"
+    "full_name": "Alice Smith",
+    "role": "organizer"
   }'
 ```
 
@@ -29,6 +50,14 @@ curl -X POST http://localhost:8080/api/users/register \
 | email | string | yes | Unique, valid email, max 100 chars |
 | password | string | yes | Hashed with bcrypt (12 rounds) |
 | full_name | string | yes | Max 100 chars |
+| role | string | no | attendee | super_admin, organizer, attendee |
+
+**Input Validation:**
+- `username`: 3-50 characters, alphanumeric and underscores only
+- `email`: Valid email format, auto-lowercased
+- `password`: 8-128 characters
+- `full_name`: 1-100 characters
+- `role`: Must be one of `super_admin`, `organizer`, `attendee` (default: `attendee`)
 
 **Response (201):**
 ```json
@@ -39,6 +68,7 @@ curl -X POST http://localhost:8080/api/users/register \
     "username": "alice",
     "email": "alice@test.com",
     "full_name": "Alice Smith",
+    "role": "organizer",
     "created_at": "2026-05-10 18:15:57.750469"
   }
 }
@@ -48,6 +78,7 @@ curl -X POST http://localhost:8080/api/users/register \
 | Status | Detail |
 |--------|--------|
 | 400 | Username or email already exists |
+| 422 | Validation error (invalid username/email/password/role format) |
 
 **Side Effects:**
 - Publishes `user.registered` to RabbitMQ → notification-service creates welcome notification
@@ -68,7 +99,7 @@ curl -X POST http://localhost:8080/api/users/login \
 **Response (200):**
 ```json
 {
-  "token": "b844eb974af8731d7782132cecc02337...",
+  "token": "eyJhbGciOiJIUzI1NiIs...",
   "user": {
     "id": 1,
     "username": "alice",
@@ -84,7 +115,8 @@ curl -X POST http://localhost:8080/api/users/login \
 | 401 | Invalid credentials |
 
 **Notes:**
-- Token is stored in Redis with 24h TTL (`token:<hex>`)
+- Returns a JWT token (HS256, 24h expiry) with user_id, username, email, and role claims
+- Session stored in Redis with 24h TTL (`session:<jwt>`)
 - Password verified using bcrypt
 
 ---
@@ -93,17 +125,45 @@ curl -X POST http://localhost:8080/api/users/login \
 
 List all active users.
 
+**Auth:** Any authenticated user
+
 ```bash
-curl http://localhost:8080/api/users
+curl http://localhost:8080/api/users \
+  -H "Authorization: Bearer $TOKEN"
 ```
 
 **Response (200):**
 ```json
 {
   "users": [
-    {"id": 1, "username": "alice", "email": "alice@test.com", "full_name": "Alice Smith", "created_at": "..."}
+    {"id": 1, "username": "alice", "email": "alice@test.com", "full_name": "Alice Smith", "role": "organizer", "created_at": "..."}
   ],
   "total": 1
+}
+```
+
+---
+
+### `GET /api/users/me`
+
+Get the current authenticated user's profile.
+
+```bash
+curl http://localhost:8080/api/users/me \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+**Auth:** Any authenticated user
+
+**Response (200):**
+```json
+{
+  "id": 1,
+  "username": "alice",
+  "email": "alice@test.com",
+  "full_name": "Alice Smith",
+  "role": "organizer",
+  "created_at": "2026-05-10 18:15:57.750469"
 }
 ```
 
@@ -113,8 +173,11 @@ curl http://localhost:8080/api/users
 
 Get user by ID.
 
+**Auth:** Any authenticated user
+
 ```bash
-curl http://localhost:8080/api/users/1
+curl http://localhost:8080/api/users/1 \
+  -H "Authorization: Bearer $TOKEN"
 ```
 
 **Errors:**
@@ -124,12 +187,55 @@ curl http://localhost:8080/api/users/1
 
 ---
 
+### `PUT /api/users/{user_id}/role`
+
+Update a user's role.
+
+```bash
+curl -X PUT http://localhost:8080/api/users/2/role \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"role": "organizer"}'
+```
+
+**Auth:** super_admin only
+
+**Request Body:**
+
+| Field | Type | Required | Values |
+|-------|------|----------|--------|
+| role | string | yes | `super_admin`, `organizer`, `attendee` |
+
+**Response (200):**
+```json
+{
+  "message": "Role updated",
+  "user": {
+    "id": 2,
+    "username": "bob",
+    "email": "bob@test.com",
+    "role": "organizer"
+  }
+}
+```
+
+**Errors:**
+| Status | Detail |
+|--------|--------|
+| 403 | Insufficient permissions (not super_admin) |
+| 404 | User not found |
+
+---
+
 ### `DELETE /api/users/{user_id}`
 
 Soft-delete a user (deactivate).
 
+**Auth:** Self-deletion or super_admin
+
 ```bash
-curl -X DELETE http://localhost:8080/api/users/1
+curl -X DELETE http://localhost:8080/api/users/1 \
+  -H "Authorization: Bearer $TOKEN"
 ```
 
 **Response (200):** `{"message": "User deactivated"}`
@@ -137,6 +243,7 @@ curl -X DELETE http://localhost:8080/api/users/1
 **Errors:**
 | Status | Detail |
 |--------|--------|
+| 403 | Can only deactivate your own account (unless super_admin) |
 | 404 | User not found |
 
 ---
@@ -147,8 +254,11 @@ curl -X DELETE http://localhost:8080/api/users/1
 
 Create a new event.
 
+**Auth:** organizer or super_admin
+
 ```bash
 curl -X POST http://localhost:8080/api/events \
+  -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
     "title": "Tech Summit",
@@ -174,7 +284,7 @@ curl -X POST http://localhost:8080/api/events \
 | end_date | string (ISO) | yes | — |
 | location | string | yes | — |
 | max_capacity | int | yes | 100 |
-| organizer_id | int | yes | — |
+| organizer_id | int | no | Auto-set from JWT for organizer; optional for super_admin |
 | ticket_price | float | no | 0.0 |
 
 **Response (200):**
@@ -192,15 +302,24 @@ curl -X POST http://localhost:8080/api/events \
 - Publishes `event.created` to RabbitMQ
 - Publishes to Redis channel `event_events`
 
+**Errors:**
+| Status | Detail |
+|--------|--------|
+| 403 | Insufficient permissions (attendee cannot create events) |
+
 ---
 
 ### `GET /api/events`
 
 List events with optional filters.
 
+**Auth:** Any authenticated user (service key also accepted)
+
 ```bash
-curl http://localhost:8080/api/events
-curl http://localhost:8080/api/events?event_type=conference&status=active
+curl http://localhost:8080/api/events \
+  -H "Authorization: Bearer $TOKEN"
+curl http://localhost:8080/api/events?event_type=conference&status=active \
+  -H "Authorization: Bearer $TOKEN"
 ```
 
 **Query Parameters:**
@@ -208,7 +327,7 @@ curl http://localhost:8080/api/events?event_type=conference&status=active
 | Param | Type | Default | Description |
 |-------|------|---------|-------------|
 | event_type | string | — | Filter by type |
-| status | string | `active` | Filter by status |
+| status | string | `active` | Filter by status (`super_admin` can use `all` to see cancelled events) |
 
 ---
 
@@ -216,8 +335,11 @@ curl http://localhost:8080/api/events?event_type=conference&status=active
 
 Get event by ID.
 
+**Auth:** Any authenticated user
+
 ```bash
-curl http://localhost:8080/api/events/1
+curl http://localhost:8080/api/events/1 \
+  -H "Authorization: Bearer $TOKEN"
 ```
 
 ---
@@ -226,11 +348,19 @@ curl http://localhost:8080/api/events/1
 
 Update event fields.
 
+**Auth:** organizer (own events only) or super_admin
+
 ```bash
 curl -X PUT http://localhost:8080/api/events/1 \
+  -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"title": "Updated Title", "max_capacity": 300}'
 ```
+
+**Errors:**
+| Status | Detail |
+|--------|--------|
+| 403 | Insufficient permissions (not the event owner or super_admin) |
 
 ---
 
@@ -238,9 +368,17 @@ curl -X PUT http://localhost:8080/api/events/1 \
 
 Cancel an event.
 
+**Auth:** organizer (own events only) or super_admin
+
 ```bash
-curl -X DELETE http://localhost:8080/api/events/1
+curl -X DELETE http://localhost:8080/api/events/1 \
+  -H "Authorization: Bearer $TOKEN"
 ```
+
+**Errors:**
+| Status | Detail |
+|--------|--------|
+| 403 | Insufficient permissions (not the event owner or super_admin) |
 
 ---
 
@@ -250,17 +388,19 @@ curl -X DELETE http://localhost:8080/api/events/1
 
 Register for an event with payment processing.
 
+**Auth:** attendee, organizer, or super_admin. user_id is derived from the JWT token.
+
 ```bash
 curl -X POST http://localhost:8080/api/registrations \
+  -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"user_id": 1, "event_id": 2, "payment_method": "card"}'
+  -d '{"event_id": 1, "payment_method": "card"}'
 ```
 
 **Request Body:**
 
 | Field | Type | Required | Default | Values |
 |-------|------|----------|---------|--------|
-| user_id | int | yes | — | — |
 | event_id | int | yes | — | — |
 | payment_method | string | no | `"free"` | `free`, `card`, `credit_card`, `paypal`, `bank_transfer` |
 | notes | string | no | `null` | — |
@@ -293,7 +433,7 @@ curl -X POST http://localhost:8080/api/registrations \
 | 503 | Event service unavailable |
 
 **Registration Flow:**
-1. `GET /events/{id}` — Verify event exists
+1. `GET /events/{id}` — Verify event exists (via `X-Service-Key`)
 2. `PATCH /events/{id}/increment-registration` — Atomically reserve a spot
 3. `process_payment_mock()` — Process payment
 4. If payment fails → `PATCH /events/{id}/decrement-registration` (compensating transaction)
@@ -307,8 +447,11 @@ curl -X POST http://localhost:8080/api/registrations \
 
 List all registrations (limit 100).
 
+**Auth:** Any user (scoped to own; super_admin sees all)
+
 ```bash
-curl http://localhost:8080/api/registrations
+curl http://localhost:8080/api/registrations \
+  -H "Authorization: Bearer $TOKEN"
 ```
 
 ---
@@ -317,15 +460,30 @@ curl http://localhost:8080/api/registrations
 
 Get registration by ID.
 
+**Auth:** Own user or super_admin
+
+**Errors:**
+| Status | Detail |
+|--------|--------|
+| 403 | Insufficient permissions (not the registration owner or super_admin) |
+
 ---
 
 ### `GET /api/registrations/user/{user_id}`
 
 List registrations for a user.
 
+**Auth:** Own user or super_admin
+
 ```bash
-curl http://localhost:8080/api/registrations/user/1
+curl http://localhost:8080/api/registrations/user/1 \
+  -H "Authorization: Bearer $TOKEN"
 ```
+
+**Errors:**
+| Status | Detail |
+|--------|--------|
+| 403 | Insufficient permissions (not the user or super_admin) |
 
 ---
 
@@ -342,6 +500,8 @@ curl http://localhost:8080/api/registrations/event/1
 ### `PATCH /api/registrations/{id}/payment`
 
 Update payment status.
+
+**Auth:** super_admin only
 
 ```bash
 curl -X PATCH http://localhost:8080/api/registrations/5/payment \
@@ -362,6 +522,8 @@ curl -X PATCH http://localhost:8080/api/registrations/5/payment \
 ### `POST /api/registrations/{id}/process-payment`
 
 Retry payment processing for an existing registration.
+
+**Auth:** Own user or super_admin
 
 ```bash
 curl -X POST http://localhost:8080/api/registrations/5/process-payment \
@@ -398,8 +560,11 @@ curl -X POST http://localhost:8080/api/registrations/5/process-payment \
 
 Cancel a registration (restores event capacity).
 
+**Auth:** Own user or super_admin
+
 ```bash
-curl -X DELETE http://localhost:8080/api/registrations/5
+curl -X DELETE http://localhost:8080/api/registrations/5 \
+  -H "Authorization: Bearer $TOKEN"
 ```
 
 **Response (200):** `{"message": "Registration cancelled"}`
@@ -416,8 +581,11 @@ curl -X DELETE http://localhost:8080/api/registrations/5
 
 List notifications for a user.
 
+**Auth:** Own user or super_admin
+
 ```bash
-curl http://localhost:8080/api/notifications/user/1
+curl http://localhost:8080/api/notifications/user/1 \
+  -H "Authorization: Bearer $TOKEN"
 ```
 
 **Query Parameters:**
@@ -425,6 +593,11 @@ curl http://localhost:8080/api/notifications/user/1
 | Param | Type | Default | Description |
 |-------|------|---------|-------------|
 | unread_only | boolean | false | Only return unread notifications |
+
+**Errors:**
+| Status | Detail |
+|--------|--------|
+| 403 | Insufficient permissions (not the user or super_admin) |
 
 **Response (200):**
 ```json
@@ -450,6 +623,8 @@ curl http://localhost:8080/api/notifications/user/1
 
 Create a single notification.
 
+**Auth:** super_admin only
+
 ```bash
 curl -X POST http://localhost:8080/api/notifications \
   -H "Content-Type: application/json" \
@@ -462,8 +637,11 @@ curl -X POST http://localhost:8080/api/notifications \
 
 Mark notification as read.
 
+**Auth:** Own user or super_admin
+
 ```bash
-curl -X PATCH http://localhost:8080/api/notifications/1/read
+curl -X PATCH http://localhost:8080/api/notifications/1/read \
+  -H "Authorization: Bearer $TOKEN"
 ```
 
 **Response (200):** `{"message": "Marked as read"}`
@@ -474,8 +652,11 @@ curl -X PATCH http://localhost:8080/api/notifications/1/read
 
 Send notification to multiple users.
 
+**Auth:** super_admin only
+
 ```bash
 curl -X POST http://localhost:8080/api/notifications/broadcast \
+  -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"user_ids": [1, 2, 3], "title": "System Update", "message": "Maintenance tonight"}'
 ```

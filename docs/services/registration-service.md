@@ -12,6 +12,7 @@ Handles event registrations with payment processing, capacity verification, and 
 | **RabbitMQ Publishing** | `registration.confirmed`, `registration.cancelled` |
 | **Sync HTTP Calls** | Calls event-service for capacity management |
 | **Dockerfile** | Multi-stage `python:3.11-slim` |
+| **Auth** | JWT (user_id from token, not request body) |
 
 ---
 
@@ -51,16 +52,30 @@ CREATE INDEX IF NOT EXISTS idx_reg_event_status ON registrations(event_id, statu
 
 ---
 
+## Authentication & Authorization
+
+| Endpoint Group | Required Role | Notes |
+|---------------|---------------|-------|
+| `POST /registrations` | attendee, organizer, super_admin | user_id derived from JWT, not request body |
+| `GET /registrations` | Any user (own only), super_admin (all) | Scoped to requesting user |
+| `GET /registrations/{id}` | Own user or super_admin | — |
+| `GET /registrations/user/{user_id}` | Own user or super_admin | — |
+| `GET /registrations/event/{event_id}` | Any authenticated user | — |
+| `PATCH /registrations/{id}/payment` | super_admin | — |
+| `POST /registrations/{id}/process-payment` | Own user or super_admin | — |
+| `DELETE /registrations/{id}` | Own user or super_admin | Sends X-Service-Key to event-service |
+
+---
+
 ## Endpoints
 
 ### `POST /registrations`
 
-Register a user for an event with payment processing.
+Register a user for an event with payment processing. `user_id` is derived from the JWT token, not the request body.
 
 **Request Body:**
 ```json
 {
-  "user_id": 1,
   "event_id": 2,
   "payment_method": "card",
   "notes": null
@@ -95,10 +110,10 @@ Register a user for an event with payment processing.
 - `503` — Event service unavailable
 
 **Registration Flow:**
-1. `GET /events/{id}` — Verify event exists
-2. `PATCH /events/{id}/increment-registration` — Atomically reserve a spot
+1. `GET /events/{id}` — Verify event exists (includes `X-Service-Key` header)
+2. `PATCH /events/{id}/increment-registration` — Atomically reserve a spot (includes `X-Service-Key` header)
 3. `process_payment_mock()` — Process payment
-4. If payment fails → `PATCH /events/{id}/decrement-registration` (compensating transaction)
+4. If payment fails → `PATCH /events/{id}/decrement-registration` (compensating transaction, includes `X-Service-Key` header)
 5. If payment succeeds → `INSERT INTO registrations`
 6. Generate ticket number (`TKT-{id:04d}-{random}`)
 7. Publish `registration.confirmed` to RabbitMQ
@@ -168,7 +183,7 @@ Cancel a registration. Calls event-service to decrement capacity.
 ```
 
 **Side Effects:**
-- `PATCH /events/{id}/decrement-registration` on event-service
+- `PATCH /events/{id}/decrement-registration` on event-service (includes `X-Service-Key` header)
 - Publishes `registration.cancelled` to RabbitMQ
 
 ---
@@ -213,5 +228,6 @@ psycopg2-binary
 redis
 pika
 httpx
+PyJWT>=2.8.0
 prometheus-fastapi-instrumentator
 ```

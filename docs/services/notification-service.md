@@ -11,6 +11,7 @@ Consumes events from RabbitMQ and creates user notifications. Also provides REST
 | **Database Table** | `notifications` |
 | **RabbitMQ Consuming** | `notification_queue` bound to all routing keys on `events` exchange |
 | **Dockerfile** | Multi-stage `python:3.11-slim` |
+| **Auth** | JWT (scoped to own user; super_admin has full access) |
 
 ---
 
@@ -45,11 +46,24 @@ CREATE INDEX IF NOT EXISTS idx_notifications_user_read ON notifications(user_id,
 
 ---
 
+## Authentication & Authorization
+
+| Endpoint Group | Required Role | Notes |
+|---------------|---------------|-------|
+| `POST /notifications` | super_admin | — |
+| `GET /notifications/user/{user_id}` | Own user or super_admin | Scoped to requesting user |
+| `PATCH /notifications/{id}/read` | Own user or super_admin | Ownership verified before marking read |
+| `POST /notifications/broadcast` | super_admin | — |
+
+---
+
 ## Endpoints
 
 ### `POST /notifications`
 
-Create a single notification.
+Create a single notification. super_admin only.
+
+**Requires:** Bearer token (super_admin)
 
 **Request Body:**
 ```json
@@ -81,7 +95,9 @@ Create a single notification.
 
 ### `GET /notifications/user/{user_id}`
 
-List all notifications for a user.
+List all notifications for a user. Users can only view their own notifications; super_admin can view any.
+
+**Requires:** Bearer token (own user or super_admin)
 
 **Query Parameters:**
 - `unread_only` (optional, boolean, default: false) — Only return unread notifications
@@ -108,7 +124,9 @@ List all notifications for a user.
 
 ### `PATCH /notifications/{notification_id}/read`
 
-Mark a notification as read.
+Mark a notification as read. Ownership verified before marking read.
+
+**Requires:** Bearer token (own user or super_admin)
 
 **Response (200):**
 ```json
@@ -122,7 +140,9 @@ Mark a notification as read.
 
 ### `POST /notifications/broadcast`
 
-Send the same notification to multiple users using a single bulk INSERT query.
+Send the same notification to multiple users using a single bulk INSERT query. super_admin only.
+
+**Requires:** Bearer token (super_admin)
 
 **Request Body:**
 ```json
@@ -212,5 +232,6 @@ fastapi
 uvicorn[standard]
 psycopg2-binary
 pika
+PyJWT>=2.8.0
 prometheus-fastapi-instrumentator
 ```

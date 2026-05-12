@@ -8,6 +8,7 @@ Nginx serves as the API gateway for the system. It handles:
 3. **Static file serving** — Hosts the frontend HTML/CSS/JS
 4. **Timeout management** — Prevents slow upstreams from blocking connections
 5. **Health check proxy** — Routes per-service health checks through the gateway
+6. **Auth header forwarding** — Passes Authorization and X-Service-Key headers to upstream services
 
 | Property | Value |
 |----------|-------|
@@ -107,6 +108,13 @@ proxy_set_header Host $host;
 proxy_set_header X-Real-IP $remote_addr;
 proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
 proxy_set_header X-Forwarded-Proto $scheme;
+```
+
+API routes (non-health, non-auth) also forward auth headers:
+
+```nginx
+proxy_set_header Authorization $http_authorization;
+proxy_set_header X-Service-Key $http_x_service_key;
 ```
 
 ---

@@ -29,6 +29,7 @@ All services share a single PostgreSQL 16 instance but each owns its own tables.
 | full_name | VARCHAR(100) | |
 | created_at | TIMESTAMP | DEFAULT NOW() |
 | is_active | BOOLEAN | DEFAULT TRUE |
+| role | VARCHAR(20) | DEFAULT 'attendee' |
 
 ### `events` (event-service)
 
@@ -88,6 +89,7 @@ All services share a single PostgreSQL 16 instance but each owns its own tables.
 | `idx_users_email` | users | `(email) WHERE is_active=TRUE` | Login lookup, uniqueness check |
 | `idx_events_status_type` | events | `(status, event_type)` | Filter active events by type |
 | `idx_events_start_date` | events | `(start_date)` | Sort events by date |
+| `idx_events_organizer` | events | `(organizer_id)` | Organizer ownership scoping |
 | `idx_reg_user` | registrations | `(user_id)` | User's registration history |
 | `idx_reg_event_status` | registrations | `(event_id, status)` | Event attendee list |
 | `idx_notifications_user_read` | notifications | `(user_id, is_read)` | User notification feed |
