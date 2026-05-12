@@ -11,6 +11,8 @@ FROM python:3.11-slim
 WORKDIR /app
 COPY --from=builder /install /usr/local
 COPY main.py .
+COPY alembic.ini .
+COPY alembic/ alembic/
 
 # Non-root user for security
 RUN adduser --disabled-password --gecos '' appuser && chown -R appuser /app

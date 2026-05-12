@@ -7,6 +7,8 @@ FROM python:3.11-slim
 WORKDIR /app
 COPY --from=builder /install /usr/local
 COPY main.py .
+COPY alembic.ini .
+COPY alembic/ alembic/
 RUN adduser --disabled-password --gecos '' appuser && chown -R appuser /app
 USER appuser
 EXPOSE 8000

@@ -254,25 +254,40 @@ def process_payment_mock(
 
 @app.on_event("startup")
 def startup():
-    with get_db() as conn:
-        with conn.cursor() as cur:
-            cur.execute(DB_SCHEMA)
-            cur.execute(
-                "ALTER TABLE registrations ADD COLUMN IF NOT EXISTS payment_reference VARCHAR(100)"
-            )
-            cur.execute(
-                "ALTER TABLE registrations ADD COLUMN IF NOT EXISTS payment_gateway VARCHAR(50)"
-            )
-            cur.execute(
-                "ALTER TABLE registrations ADD COLUMN IF NOT EXISTS payment_processed_at TIMESTAMP"
-            )
-            cur.execute(
-                "CREATE INDEX IF NOT EXISTS idx_reg_user ON registrations(user_id)"
-            )
-            cur.execute(
-                "CREATE INDEX IF NOT EXISTS idx_reg_event_status ON registrations(event_id, status)"
-            )
-        conn.commit()
+    try:
+        from alembic.config import Config as AlembicConfig
+        from alembic import command as alembic_command
+
+        alembic_cfg = AlembicConfig("alembic.ini")
+        db_url = (
+            f"postgresql://{os.getenv('DB_USER', 'postgres')}:"
+            f"{os.getenv('DB_PASSWORD', 'postgres')}@"
+            f"{os.getenv('DB_HOST', 'postgres')}:"
+            f"{os.getenv('DB_PORT', '5432')}/"
+            f"{os.getenv('DB_NAME', 'eventdb')}"
+        )
+        alembic_cfg.set_main_option("sqlalchemy.url", db_url)
+        alembic_command.upgrade(alembic_cfg, "head")
+    except Exception:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute(DB_SCHEMA)
+                cur.execute(
+                    "ALTER TABLE registrations ADD COLUMN IF NOT EXISTS payment_reference VARCHAR(100)"
+                )
+                cur.execute(
+                    "ALTER TABLE registrations ADD COLUMN IF NOT EXISTS payment_gateway VARCHAR(50)"
+                )
+                cur.execute(
+                    "ALTER TABLE registrations ADD COLUMN IF NOT EXISTS payment_processed_at TIMESTAMP"
+                )
+                cur.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_reg_user ON registrations(user_id)"
+                )
+                cur.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_reg_event_status ON registrations(event_id, status)"
+                )
+            conn.commit()
 
 
 @app.get("/health")

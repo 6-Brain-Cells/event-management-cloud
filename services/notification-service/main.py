@@ -204,13 +204,28 @@ def rabbitmq_consumer():
 
 @app.on_event("startup")
 def startup():
-    with get_db() as conn:
-        with conn.cursor() as cur:
-            cur.execute(DB_SCHEMA)
-            cur.execute(
-                "CREATE INDEX IF NOT EXISTS idx_notifications_user_read ON notifications(user_id, is_read)"
-            )
-        conn.commit()
+    try:
+        from alembic.config import Config as AlembicConfig
+        from alembic import command as alembic_command
+
+        alembic_cfg = AlembicConfig("alembic.ini")
+        db_url = (
+            f"postgresql://{os.getenv('DB_USER', 'postgres')}:"
+            f"{os.getenv('DB_PASSWORD', 'postgres')}@"
+            f"{os.getenv('DB_HOST', 'postgres')}:"
+            f"{os.getenv('DB_PORT', '5432')}/"
+            f"{os.getenv('DB_NAME', 'eventdb')}"
+        )
+        alembic_cfg.set_main_option("sqlalchemy.url", db_url)
+        alembic_command.upgrade(alembic_cfg, "head")
+    except Exception:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute(DB_SCHEMA)
+                cur.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_notifications_user_read ON notifications(user_id, is_read)"
+                )
+            conn.commit()
 
     t = threading.Thread(target=rabbitmq_consumer, daemon=True)
     t.start()

@@ -258,16 +258,31 @@ def verify_password(password: str, hashed: str) -> bool:
 
 @app.on_event("startup")
 def startup():
-    with get_db() as conn:
-        with conn.cursor() as cur:
-            cur.execute(DB_SCHEMA)
-            cur.execute(
-                "ALTER TABLE users ADD COLUMN IF NOT EXISTS role VARCHAR(20) DEFAULT 'attendee'"
-            )
-            cur.execute(
-                "CREATE INDEX IF NOT EXISTS idx_users_email ON users(email) WHERE is_active=TRUE"
-            )
-        conn.commit()
+    try:
+        from alembic.config import Config as AlembicConfig
+        from alembic import command as alembic_command
+
+        alembic_cfg = AlembicConfig("alembic.ini")
+        db_url = (
+            f"postgresql://{os.getenv('DB_USER', 'postgres')}:"
+            f"{os.getenv('DB_PASSWORD', 'postgres')}@"
+            f"{os.getenv('DB_HOST', 'postgres')}:"
+            f"{os.getenv('DB_PORT', '5432')}/"
+            f"{os.getenv('DB_NAME', 'eventdb')}"
+        )
+        alembic_cfg.set_main_option("sqlalchemy.url", db_url)
+        alembic_command.upgrade(alembic_cfg, "head")
+    except Exception:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute(DB_SCHEMA)
+                cur.execute(
+                    "ALTER TABLE users ADD COLUMN IF NOT EXISTS role VARCHAR(20) DEFAULT 'attendee'"
+                )
+                cur.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_users_email ON users(email) WHERE is_active=TRUE"
+                )
+            conn.commit()
 
 
 @app.get("/health")
