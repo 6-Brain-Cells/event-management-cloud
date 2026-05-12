@@ -18,6 +18,7 @@ import random
 import string
 import secrets
 import pika
+import math
 from datetime import datetime
 
 app = FastAPI(title="Registration Service", version="2.0.0")
@@ -74,13 +75,15 @@ def _get_pool():
     global _db_pool
     if _db_pool is None or _db_pool.closed:
         _db_pool = psycopg2.pool.ThreadedConnectionPool(
-            minconn=2,
-            maxconn=10,
+            minconn=int(os.getenv("DB_POOL_MIN", "2")),
+            maxconn=int(os.getenv("DB_POOL_MAX", "10")),
             host=os.getenv("DB_HOST", "postgres"),
             port=os.getenv("DB_PORT", "5432"),
             dbname=os.getenv("DB_NAME", "eventdb"),
             user=os.getenv("DB_USER", "postgres"),
             password=os.getenv("DB_PASSWORD", "postgres"),
+            connect_timeout=int(os.getenv("DB_CONNECT_TIMEOUT", "5")),
+            options="-c statement_timeout=5000",
         )
     return _db_pool
 
@@ -425,24 +428,58 @@ def register(
     return {"message": "Registration successful", "registration": new_reg}
 
 
+DEFAULT_PAGE_SIZE = 20
+MAX_PAGE_SIZE = 100
+
+
 @app.get("/registrations")
-def list_registrations(user: dict = Depends(get_current_user)):
+def list_registrations(
+    page: int = 1,
+    page_size: int = DEFAULT_PAGE_SIZE,
+    user: dict = Depends(get_current_user),
+):
+    page = max(1, page)
+    page_size = min(max(1, page_size), MAX_PAGE_SIZE)
+    offset = (page - 1) * page_size
+
     if user["role"] == "super_admin":
         with get_db() as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute("SELECT COUNT(*) as cnt FROM registrations")
+                total = cur.fetchone()["cnt"]
                 cur.execute(
-                    "SELECT * FROM registrations ORDER BY registration_date DESC LIMIT 100"
+                    "SELECT * FROM registrations ORDER BY registration_date DESC LIMIT %s OFFSET %s",
+                    (page_size, offset),
                 )
                 regs = [_serialize_row(dict(r)) for r in cur.fetchall()]
-                return {"registrations": regs, "total": len(regs)}
+                total_pages = math.ceil(total / page_size) if total > 0 else 1
+                return {
+                    "registrations": regs,
+                    "total": total,
+                    "page": page,
+                    "page_size": page_size,
+                    "total_pages": total_pages,
+                }
     with get_db() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
-                "SELECT * FROM registrations WHERE user_id=%s ORDER BY registration_date DESC LIMIT 100",
+                "SELECT COUNT(*) as cnt FROM registrations WHERE user_id=%s",
                 (user["user_id"],),
             )
+            total = cur.fetchone()["cnt"]
+            cur.execute(
+                "SELECT * FROM registrations WHERE user_id=%s ORDER BY registration_date DESC LIMIT %s OFFSET %s",
+                (user["user_id"], page_size, offset),
+            )
             regs = [_serialize_row(dict(r)) for r in cur.fetchall()]
-            return {"registrations": regs, "total": len(regs)}
+            total_pages = math.ceil(total / page_size) if total > 0 else 1
+            return {
+                "registrations": regs,
+                "total": total,
+                "page": page,
+                "page_size": page_size,
+                "total_pages": total_pages,
+            }
 
 
 @app.get("/registrations/{registration_id}")

@@ -15,6 +15,7 @@ import json
 import jwt
 from datetime import datetime
 import pika
+import math
 
 app = FastAPI(title="Event Service", version="2.0.0")
 
@@ -36,6 +37,9 @@ app.add_middleware(
 JWT_SECRET = os.getenv("JWT_SECRET", "event-mgmt-secret-change-in-prod")
 JWT_ALGORITHM = "HS256"
 SERVICE_API_KEY = os.getenv("SERVICE_API_KEY", "")
+CACHE_TTL = int(os.getenv("CACHE_TTL", "30"))
+DEFAULT_PAGE_SIZE = 20
+MAX_PAGE_SIZE = 100
 
 security = HTTPBearer()
 security_optional = HTTPBearer(auto_error=False)
@@ -117,13 +121,15 @@ def _get_pool():
     global _db_pool
     if _db_pool is None or _db_pool.closed:
         _db_pool = psycopg2.pool.ThreadedConnectionPool(
-            minconn=2,
-            maxconn=10,
+            minconn=int(os.getenv("DB_POOL_MIN", "2")),
+            maxconn=int(os.getenv("DB_POOL_MAX", "10")),
             host=os.getenv("DB_HOST", "postgres"),
             port=os.getenv("DB_PORT", "5432"),
             dbname=os.getenv("DB_NAME", "eventdb"),
             user=os.getenv("DB_USER", "postgres"),
             password=os.getenv("DB_PASSWORD", "postgres"),
+            connect_timeout=int(os.getenv("DB_CONNECT_TIMEOUT", "5")),
+            options="-c statement_timeout=5000",
         )
     return _db_pool
 
@@ -269,6 +275,15 @@ def _serialize_row(row: dict) -> dict:
     return {k: str(v) if isinstance(v, datetime) else v for k, v in row.items()}
 
 
+def _invalidate_events_cache():
+    try:
+        r = get_redis()
+        for key in r.scan_iter("events:list:*"):
+            r.delete(key)
+    except Exception:
+        pass
+
+
 @app.on_event("startup")
 def startup():
     try:
@@ -376,6 +391,8 @@ def create_event(
         },
     )
 
+    _invalidate_events_cache()
+
     return {"message": "Event created", "event": new_event}
 
 
@@ -383,30 +400,67 @@ def create_event(
 def list_events(
     event_type: Optional[str] = None,
     status: str = "active",
+    page: int = 1,
+    page_size: int = DEFAULT_PAGE_SIZE,
     user: dict = Depends(verify_service_or_any_user),
 ):
+    page = max(1, page)
+    page_size = min(max(1, page_size), MAX_PAGE_SIZE)
+
+    cache_key = f"events:list:{status}:{event_type or 'all'}:{page}:{page_size}"
+    if user.get("role") == "super_admin" and status == "all":
+        cache_key += ":admin"
+
+    try:
+        r = get_redis()
+        cached = r.get(cache_key)
+        if cached:
+            return json.loads(cached)
+    except Exception:
+        pass
+
     with get_db() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            base_where = ""
+            params = []
+
             if user.get("role") == "super_admin" and status == "all":
                 if event_type:
-                    cur.execute(
-                        "SELECT * FROM events WHERE event_type=%s ORDER BY start_date",
-                        (event_type,),
-                    )
-                else:
-                    cur.execute("SELECT * FROM events ORDER BY start_date")
+                    base_where = "WHERE event_type=%s"
+                    params = [event_type]
             elif event_type:
-                cur.execute(
-                    "SELECT * FROM events WHERE status=%s AND event_type=%s ORDER BY start_date",
-                    (status, event_type),
-                )
+                base_where = "WHERE status=%s AND event_type=%s"
+                params = [status, event_type]
             else:
-                cur.execute(
-                    "SELECT * FROM events WHERE status=%s ORDER BY start_date",
-                    (status,),
-                )
+                base_where = "WHERE status=%s"
+                params = [status]
+
+            cur.execute(f"SELECT COUNT(*) as cnt FROM events {base_where}", params)
+            total = cur.fetchone()["cnt"]
+
+            offset = (page - 1) * page_size
+            cur.execute(
+                f"SELECT * FROM events {base_where} ORDER BY start_date LIMIT %s OFFSET %s",
+                params + [page_size, offset],
+            )
             events = [_serialize_row(dict(r)) for r in cur.fetchall()]
-            return {"events": events, "total": len(events)}
+
+    total_pages = math.ceil(total / page_size) if total > 0 else 1
+    result = {
+        "events": events,
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "total_pages": total_pages,
+    }
+
+    try:
+        r = get_redis()
+        r.setex(cache_key, CACHE_TTL, json.dumps(result, default=str))
+    except Exception:
+        pass
+
+    return result
 
 
 @app.get("/events/{event_id}")
@@ -475,6 +529,7 @@ def update_event(
                     detail="Optimistic concurrency conflict: event was modified concurrently",
                 )
             conn.commit()
+            _invalidate_events_cache()
             return {"message": "Event updated", "event": _serialize_row(dict(row))}
 
 
@@ -563,4 +618,5 @@ def cancel_event(
                     detail="Optimistic concurrency conflict: event was modified concurrently",
                 )
             conn.commit()
+            _invalidate_events_cache()
             return {"message": "Event cancelled"}

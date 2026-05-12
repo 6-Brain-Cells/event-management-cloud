@@ -100,13 +100,15 @@ def _get_pool():
     global _db_pool
     if _db_pool is None or _db_pool.closed:
         _db_pool = psycopg2.pool.ThreadedConnectionPool(
-            minconn=2,
-            maxconn=10,
+            minconn=int(os.getenv("DB_POOL_MIN", "2")),
+            maxconn=int(os.getenv("DB_POOL_MAX", "10")),
             host=os.getenv("DB_HOST", "postgres"),
             port=os.getenv("DB_PORT", "5432"),
             dbname=os.getenv("DB_NAME", "eventdb"),
             user=os.getenv("DB_USER", "postgres"),
             password=os.getenv("DB_PASSWORD", "postgres"),
+            connect_timeout=int(os.getenv("DB_CONNECT_TIMEOUT", "5")),
+            options="-c statement_timeout=5000",
         )
     return _db_pool
 
