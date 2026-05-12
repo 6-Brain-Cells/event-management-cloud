@@ -267,6 +267,72 @@ All pool connections use `statement_timeout=5000ms` to prevent long-running quer
 
 ---
 
+## Circuit Breaker
+
+The registration service uses a circuit breaker to protect synchronous calls to the event-service. When the event-service becomes unhealthy, the breaker trips and prevents cascading failures.
+
+### Configuration
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `CB_FAILURE_THRESHOLD` | `5` | Consecutive failures before opening the breaker |
+| `CB_RECOVERY_TIMEOUT` | `30` | Seconds to wait before transitioning from open to half-open |
+| `CB_HALF_OPEN_MAX` | `3` | Max test requests allowed in half-open state |
+
+### State Machine
+
+```
+closed ──(failure threshold reached)──► open
+open ──(recovery timeout elapsed)──► half_open
+half_open ──(all test requests succeed)──► closed
+half_open ──(any test request fails)──► open
+```
+
+- **closed** — Requests flow normally. Failures are counted.
+- **open** — Requests are rejected immediately with `503 Service Unavailable`.
+- **half_open** — A limited number of test requests are allowed through to probe the downstream service.
+
+The `GET /health` endpoint includes the current breaker state in its response:
+
+```json
+{
+  "status": "healthy",
+  "service": "registration-service",
+  "circuit_breaker": {
+    "state": "closed",
+    "failure_count": 0,
+    "last_failure": null
+  }
+}
+```
+
+---
+
+## Structured Logging
+
+The registration service emits JSON-structured logs with correlation IDs for request tracing across services. Every log entry includes:
+
+- `correlation_id` — Unique identifier propagated via the `X-Correlation-ID` HTTP header. If not provided, a UUID is generated at the gateway.
+- `timestamp`, `level`, `service`, `message` — Standard fields.
+- `method`, `path`, `status_code`, `duration_ms` — Request-scoped fields where applicable.
+
+Example log entry:
+
+```json
+{
+  "timestamp": "2026-05-12T10:30:00.123Z",
+  "level": "INFO",
+  "service": "registration-service",
+  "correlation_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "message": "Registration created",
+  "registration_id": 5,
+  "event_id": 2,
+  "user_id": 1
+}
+```
+
+---
+
 ## Dependencies
 
 ```

@@ -262,6 +262,30 @@ Alembic tracks applied migrations in `alembic_version_user` (not the default `al
 
 ---
 
+## Structured Logging
+
+The user service emits JSON-structured logs with correlation IDs for request tracing across services. Every log entry includes:
+
+- `correlation_id` — Unique identifier propagated via the `X-Correlation-ID` HTTP header. If not provided, a UUID is generated at the gateway.
+- `timestamp`, `level`, `service`, `message` — Standard fields.
+- `method`, `path`, `status_code`, `duration_ms` — Request-scoped fields where applicable.
+
+Example log entry:
+
+```json
+{
+  "timestamp": "2026-05-12T10:30:00.123Z",
+  "level": "INFO",
+  "service": "user-service",
+  "correlation_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "message": "User registered",
+  "user_id": 1,
+  "username": "alice"
+}
+```
+
+---
+
 ## Dependencies
 
 ```

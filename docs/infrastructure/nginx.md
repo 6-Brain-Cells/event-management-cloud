@@ -9,6 +9,7 @@ Nginx serves as the API gateway for the system. It handles:
 4. **Timeout management** — Prevents slow upstreams from blocking connections
 5. **Health check proxy** — Routes per-service health checks through the gateway
 6. **Auth header forwarding** — Passes Authorization and X-Service-Key headers to upstream services
+7. **Correlation ID propagation** — Forwards `X-Correlation-ID` header to upstream services for distributed request tracing
 
 | Property | Value |
 |----------|-------|
@@ -116,6 +117,14 @@ API routes (non-health, non-auth) also forward auth headers:
 proxy_set_header Authorization $http_authorization;
 proxy_set_header X-Service-Key $http_x_service_key;
 ```
+
+All proxied requests also forward the correlation ID header for distributed tracing:
+
+```nginx
+proxy_set_header X-Correlation-ID $http_x_correlation_id;
+```
+
+If no `X-Correlation-ID` header is present on the incoming request, a UUID is generated and attached by the gateway before proxying to upstream services.
 
 ---
 

@@ -31,6 +31,9 @@ Each service is a standalone FastAPI application running in its own Docker conta
 9. **Optimistic concurrency** — Events use a `version` column; PUT and DELETE require the current version, returning 409 on mismatch to prevent lost updates
 10. **Database migrations** — Each service runs Alembic migrations on startup with its own version table; falls back to `CREATE TABLE IF NOT EXISTS` if Alembic is unavailable
 11. **Redis caching** — Event listings cached with 30s TTL; cache invalidated on writes
+12. **Circuit breaker** — Registration-service protects calls to event-service; configurable thresholds with closed → open → half-open state machine
+13. **Dead letter queue** — Notification-service captures poison messages after max retries; DLX exchange for inspection and replay
+14. **Structured logging with correlation IDs** — All services emit JSON logs with `X-Correlation-ID` propagation for end-to-end request tracing
 
 ---
 
@@ -62,11 +65,15 @@ Each service is a standalone FastAPI application running in its own Docker conta
               ▼    ▼
      ┌───────────────────────────────────────────────────┐
      │              RabbitMQ (AMQP :5672)                 │
-     │         Exchange: "events" (topic)                 │
-     │   ┌──────────────────────────────────────────┐    │
-     │   │  notification_queue (consumer: notif-svc) │    │
-     │   │  bindings: user.*, event.*, registration.*│    │
-     │   └──────────────────────────────────────────┘    │
+      │         Exchange: "events" (topic)                 │
+      │   ┌──────────────────────────────────────────┐    │
+      │   │  notification_queue (consumer: notif-svc) │    │
+      │   │  bindings: user.*, event.*, registration.*│    │
+      │   │  x-dead-letter-exchange: notification_dlx │    │
+      │   └──────────────────────────────────────────┘    │
+      │   ┌──────────────────────────────────────────┐    │
+      │   │  notification_dlx (dead letter queue)     │    │
+      │   └──────────────────────────────────────────┘    │
      └───────────────────────────────────────────────────┘
               │          │            │
               ▼          ▼            ▼
@@ -124,6 +131,18 @@ Redis is also used for JWT session storage — the user-service stores JWT sessi
 ### Response Caching
 
 Event listings (`GET /events`) are cached in Redis with a 30-second TTL. The cache key encodes the query filters: `events:list:{status}:{event_type}:{page}:{page_size}`. The cache is invalidated whenever an event is created, updated, or deleted, ensuring stale data is served for at most 30 seconds.
+
+### Circuit Breaker
+
+The registration-service protects synchronous calls to the event-service with a circuit breaker. After `CB_FAILURE_THRESHOLD` (default: 5) consecutive failures, the breaker opens and immediately rejects requests with `503`. After `CB_RECOVERY_TIMEOUT` (default: 30s), the breaker transitions to half-open, allowing `CB_HALF_OPEN_MAX` (default: 3) test requests to probe the downstream service. This prevents cascading failures when the event-service is degraded.
+
+### Dead Letter Queue
+
+The notification-service's `notification_queue` is configured with a dead-letter exchange (`notification_dlx`). Messages that fail processing after `DLQ_MAX_RETRIES` (default: 3) attempts are routed to the `notification_dlx` queue for inspection and manual replay. The `GET /notifications/dlq/stats` endpoint (super_admin only) provides visibility into failed messages.
+
+### Structured Logging with Correlation IDs
+
+All services emit JSON-structured logs with a `correlation_id` field. The nginx gateway generates a UUID and injects it as the `X-Correlation-ID` header on every incoming request. Services propagate this header on inter-service calls, enabling end-to-end request tracing across the full microservice chain. Log entries include `timestamp`, `level`, `service`, `correlation_id`, `message`, and optional request-scoped fields (`method`, `path`, `status_code`, `duration_ms`).
 
 ---
 

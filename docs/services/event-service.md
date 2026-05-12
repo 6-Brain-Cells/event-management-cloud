@@ -317,6 +317,30 @@ All pool connections use `statement_timeout=5000ms` to prevent long-running quer
 
 ---
 
+## Structured Logging
+
+The event service emits JSON-structured logs with correlation IDs for request tracing across services. Every log entry includes:
+
+- `correlation_id` — Unique identifier propagated via the `X-Correlation-ID` HTTP header. If not provided, a UUID is generated at the gateway.
+- `timestamp`, `level`, `service`, `message` — Standard fields.
+- `method`, `path`, `status_code`, `duration_ms` — Request-scoped fields where applicable.
+
+Example log entry:
+
+```json
+{
+  "timestamp": "2026-05-12T10:30:00.123Z",
+  "level": "INFO",
+  "service": "event-service",
+  "correlation_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "message": "Event created",
+  "event_id": 1,
+  "organizer_id": 1
+}
+```
+
+---
+
 ## Dependencies
 
 ```

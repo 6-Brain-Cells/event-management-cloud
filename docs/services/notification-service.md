@@ -182,6 +182,8 @@ The notification service runs a background daemon thread that consumes messages 
 ```
 Exchange: "events" (type: topic, durable)
 Queue: "notification_queue" (durable)
+  x-dead-letter-exchange: "notification_dlx"
+  x-dead-letter-routing-key: "notification_queue"
 Bindings:
   - user.registered
   - event.created
@@ -241,6 +243,90 @@ The notification service uses **Alembic** for database schema migrations. On sta
 ### Version Table
 
 Alembic tracks applied migrations in `alembic_version_notification` (not the default `alembic_version`) to avoid conflicts with other services sharing the same PostgreSQL database.
+
+---
+
+## Dead Letter Queue
+
+The `notification_queue` is configured with a dead-letter exchange to capture messages that fail processing after repeated retries. This prevents poison messages from blocking the consumer indefinitely.
+
+### Configuration
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `DLQ_MAX_RETRIES` | `3` | Maximum delivery attempts before routing to the DLQ |
+
+### Queue Topology
+
+```
+Exchange: "events" (topic, durable)
+  └── Queue: "notification_queue" (durable, x-dead-letter-exchange="notification_dlx")
+        ├── x-dead-letter-exchange: "notification_dlx"
+        └── x-dead-letter-routing-key: "notification_queue"
+
+Exchange: "notification_dlx" (direct, durable)
+  └── Queue: "notification_dlx" (durable)
+```
+
+### Behavior
+
+1. A message arrives on `notification_queue` and processing fails (exception in callback)
+2. The message is `basic_nack`'d without requeue — RabbitMQ routes it back to the queue for retry
+3. After `DLQ_MAX_RETRIES` failed attempts (tracked via `x-death` header), the message is routed to the `notification_dlx` queue
+4. DLQ messages can be inspected and replayed manually
+
+### DLQ Statistics Endpoint
+
+`GET /notifications/dlq/stats` (super_admin only) returns dead-letter queue statistics:
+
+```json
+{
+  "dlq_queue": "notification_dlx",
+  "message_count": 2,
+  "consumer_count": 0,
+  "messages": [
+    {
+      "routing_key": "user.registered",
+      "headers": {
+        "x-death": [
+          {
+            "count": 3,
+            "reason": "rejected",
+            "queue": "notification_queue",
+            "time": "2026-05-12T10:15:00Z"
+          }
+        ]
+      },
+      "body": {"event": "user_registered", "user_id": 42}
+    }
+  ]
+}
+```
+
+---
+
+## Structured Logging
+
+The notification service emits JSON-structured logs with correlation IDs for request tracing across services. Every log entry includes:
+
+- `correlation_id` — Unique identifier propagated via the `X-Correlation-ID` HTTP header. If not provided, a UUID is generated at the gateway.
+- `timestamp`, `level`, `service`, `message` — Standard fields.
+- `method`, `path`, `status_code`, `duration_ms` — Request-scoped fields where applicable.
+
+Example log entry:
+
+```json
+{
+  "timestamp": "2026-05-12T10:30:00.123Z",
+  "level": "INFO",
+  "service": "notification-service",
+  "correlation_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "message": "Notification created",
+  "notification_id": 15,
+  "user_id": 1,
+  "notification_type": "info"
+}
+```
 
 ---
 

@@ -715,6 +715,44 @@ curl -X POST http://localhost:8080/api/notifications/broadcast \
 
 ---
 
+### `GET /api/notifications/dlq/stats`
+
+Retrieve dead letter queue statistics and messages.
+
+**Auth:** super_admin only
+
+```bash
+curl http://localhost:8080/api/notifications/dlq/stats \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+**Response (200):**
+```json
+{
+  "dlq_queue": "notification_dlx",
+  "message_count": 2,
+  "consumer_count": 0,
+  "messages": [
+    {
+      "routing_key": "user.registered",
+      "headers": {
+        "x-death": [
+          {
+            "count": 3,
+            "reason": "rejected",
+            "queue": "notification_queue",
+            "time": "2026-05-12T10:15:00Z"
+          }
+        ]
+      },
+      "body": {"event": "user_registered", "user_id": 42}
+    }
+  ]
+}
+```
+
+---
+
 ## Redis Caching
 
 Event listing responses (`GET /api/events`) are cached in Redis to reduce database load under high traffic.
@@ -742,6 +780,7 @@ curl http://localhost:8080/api/notifications/health     # notification-service
 
 Gateway returns: `{"status":"gateway-healthy"}`
 Services return: `{"status":"healthy","service":"<name>"}`
+Registration service health includes circuit breaker state: `{"status":"healthy","service":"registration-service","circuit_breaker":{"state":"closed","failure_count":0,"last_failure":null}}`
 
 ### Direct service access (dev only)
 
