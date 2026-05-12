@@ -18,6 +18,9 @@ x-common-env: &common-env
   RABBITMQ_PORT: "5672"
   RABBITMQ_USER: guest
   RABBITMQ_PASSWORD: guest
+  JWT_SECRET: event-mgmt-jwt-secret-2024
+  SERVICE_API_KEY: svc-key-internal-2024
+  CORS_ORIGINS: "http://localhost:8080,http://localhost:8081,http://localhost:8082"
 
 x-service-defaults: &service-defaults
   restart: unless-stopped

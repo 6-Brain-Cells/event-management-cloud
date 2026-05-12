@@ -1,6 +1,7 @@
 from contextlib import contextmanager
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends, Security
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from prometheus_fastapi_instrumentator import Instrumentator
 from pydantic import BaseModel
 from typing import Optional, List
@@ -9,20 +10,32 @@ import psycopg2.extras
 import psycopg2.pool
 import os
 import json
+import jwt
 import threading
 import pika
 from datetime import datetime
 
-app = FastAPI(title="Notification Service", version="1.0.0")
+app = FastAPI(title="Notification Service", version="2.0.0")
 
 Instrumentator().instrument(app).expose(app)
 
+CORS_ORIGINS = os.getenv(
+    "CORS_ORIGINS",
+    "http://localhost:8080,http://localhost:8081,http://localhost:8082",
+).split(",")
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=CORS_ORIGINS,
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+JWT_SECRET = os.getenv("JWT_SECRET", "event-mgmt-secret-change-in-prod")
+JWT_ALGORITHM = "HS256"
+
+security = HTTPBearer()
 
 _db_pool = None
 
@@ -63,6 +76,33 @@ def get_db():
         yield conn
     finally:
         pool.putconn(conn)
+
+
+def decode_token(token: str) -> dict:
+    try:
+        return jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Token expired")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+
+def get_current_user(
+    credentials: HTTPAuthorizationCredentials = Security(security),
+) -> dict:
+    return decode_token(credentials.credentials)
+
+
+def require_role(*allowed_roles):
+    def role_checker(user: dict = Depends(get_current_user)):
+        if user.get("role") not in allowed_roles:
+            raise HTTPException(
+                status_code=403,
+                detail=f"Insufficient permissions. Required: {list(allowed_roles)}, has: '{user.get('role')}'",
+            )
+        return user
+
+    return role_checker
 
 
 class NotificationCreate(BaseModel):
@@ -182,7 +222,9 @@ def health():
 
 
 @app.post("/notifications")
-def create_notification(notif: NotificationCreate):
+def create_notification(
+    notif: NotificationCreate, user=Depends(require_role("super_admin"))
+):
     with get_db() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
@@ -195,7 +237,11 @@ def create_notification(notif: NotificationCreate):
 
 
 @app.get("/notifications/user/{user_id}")
-def get_user_notifications(user_id: int, unread_only: bool = False):
+def get_user_notifications(
+    user_id: int, unread_only: bool = False, user: dict = Depends(get_current_user)
+):
+    if user["role"] != "super_admin" and user["user_id"] != user_id:
+        raise HTTPException(status_code=403, detail="Access denied")
     with get_db() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             if unread_only:
@@ -213,21 +259,28 @@ def get_user_notifications(user_id: int, unread_only: bool = False):
 
 
 @app.patch("/notifications/{notification_id}/read")
-def mark_read(notification_id: int):
+def mark_read(notification_id: int, user: dict = Depends(get_current_user)):
     with get_db() as conn:
-        with conn.cursor() as cur:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                "SELECT user_id FROM notifications WHERE id=%s",
+                (notification_id,),
+            )
+            notif = cur.fetchone()
+            if not notif:
+                raise HTTPException(status_code=404, detail="Notification not found")
+            if user["role"] != "super_admin" and notif["user_id"] != user["user_id"]:
+                raise HTTPException(status_code=403, detail="Access denied")
             cur.execute(
                 "UPDATE notifications SET is_read=TRUE WHERE id=%s RETURNING id",
                 (notification_id,),
             )
-            if not cur.fetchone():
-                raise HTTPException(status_code=404, detail="Notification not found")
             conn.commit()
             return {"message": "Marked as read"}
 
 
 @app.post("/notifications/broadcast")
-def broadcast(req: BroadcastRequest):
+def broadcast(req: BroadcastRequest, user=Depends(require_role("super_admin"))):
     if not req.user_ids:
         raise HTTPException(status_code=400, detail="user_ids cannot be empty")
     with get_db() as conn:

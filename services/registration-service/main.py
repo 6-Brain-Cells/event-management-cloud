@@ -1,15 +1,18 @@
 from contextlib import contextmanager
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends, Security
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from prometheus_fastapi_instrumentator import Instrumentator
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from typing import Optional
 import psycopg2
 import psycopg2.extras
 import psycopg2.pool
 import os
+import re
 import redis
 import json
+import jwt
 import httpx
 import random
 import string
@@ -17,18 +20,29 @@ import secrets
 import pika
 from datetime import datetime
 
-app = FastAPI(title="Registration Service", version="1.0.0")
+app = FastAPI(title="Registration Service", version="2.0.0")
 
 Instrumentator().instrument(app).expose(app)
 
+CORS_ORIGINS = os.getenv(
+    "CORS_ORIGINS",
+    "http://localhost:8080,http://localhost:8081,http://localhost:8082",
+).split(",")
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=CORS_ORIGINS,
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+JWT_SECRET = os.getenv("JWT_SECRET", "event-mgmt-secret-change-in-prod")
+JWT_ALGORITHM = "HS256"
+SERVICE_API_KEY = os.getenv("SERVICE_API_KEY", "")
 EVENT_SERVICE_URL = os.getenv("EVENT_SERVICE_URL", "http://event-service:8000")
+
+security = HTTPBearer()
 
 _db_pool = None
 _redis_client = None
@@ -128,6 +142,33 @@ def publish_event(routing_key: str, payload: dict):
         pass
 
 
+def decode_token(token: str) -> dict:
+    try:
+        return jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Token expired")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+
+def get_current_user(
+    credentials: HTTPAuthorizationCredentials = Security(security),
+) -> dict:
+    return decode_token(credentials.credentials)
+
+
+def require_role(*allowed_roles):
+    def role_checker(user: dict = Depends(get_current_user)):
+        if user.get("role") not in allowed_roles:
+            raise HTTPException(
+                status_code=403,
+                detail=f"Insufficient permissions. Required: {list(allowed_roles)}, has: '{user.get('role')}'",
+            )
+        return user
+
+    return role_checker
+
+
 @contextmanager
 def get_db():
     pool = _get_pool()
@@ -140,10 +181,24 @@ def get_db():
 
 
 class RegistrationCreate(BaseModel):
-    user_id: int
     event_id: int
     payment_method: Optional[str] = "free"
     notes: Optional[str] = None
+
+    @field_validator("payment_method")
+    @classmethod
+    def validate_payment(cls, v):
+        v = (v or "free").lower()
+        if v not in SUPPORTED_PAYMENT_METHODS:
+            raise ValueError(f"Unsupported payment method: {v}")
+        return v
+
+    @field_validator("notes")
+    @classmethod
+    def validate_notes(cls, v):
+        if v and len(v) > 1000:
+            raise ValueError("Notes must be at most 1000 characters")
+        return v
 
 
 class PaymentUpdate(BaseModel):
@@ -226,11 +281,18 @@ def health():
 
 
 @app.post("/registrations")
-def register(reg: RegistrationCreate):
+def register(
+    reg: RegistrationCreate,
+    user=Depends(require_role("attendee", "organizer", "super_admin")),
+):
+    user_id = user["user_id"]
     client = get_http_client()
+    headers = {"X-Service-Key": SERVICE_API_KEY}
 
     try:
-        event_resp = client.get(f"{EVENT_SERVICE_URL}/events/{reg.event_id}")
+        event_resp = client.get(
+            f"{EVENT_SERVICE_URL}/events/{reg.event_id}", headers=headers
+        )
         if event_resp.status_code == 404:
             raise HTTPException(status_code=404, detail="Event not found")
         if event_resp.status_code != 200:
@@ -242,7 +304,8 @@ def register(reg: RegistrationCreate):
     increment_done = False
     try:
         resp = client.patch(
-            f"{EVENT_SERVICE_URL}/events/{reg.event_id}/increment-registration"
+            f"{EVENT_SERVICE_URL}/events/{reg.event_id}/increment-registration",
+            headers=headers,
         )
         if resp.status_code == 409:
             raise HTTPException(status_code=409, detail="Event is full")
@@ -260,7 +323,8 @@ def register(reg: RegistrationCreate):
         if increment_done:
             try:
                 client.patch(
-                    f"{EVENT_SERVICE_URL}/events/{reg.event_id}/decrement-registration"
+                    f"{EVENT_SERVICE_URL}/events/{reg.event_id}/decrement-registration",
+                    headers=headers,
                 )
             except Exception:
                 pass
@@ -283,7 +347,7 @@ def register(reg: RegistrationCreate):
                         payment_reference, payment_gateway, payment_processed_at, notes
                     ) VALUES (%s, %s, %s, %s, %s, %s, NOW(), %s) RETURNING *""",
                     (
-                        reg.user_id,
+                        user_id,
                         reg.event_id,
                         reg.payment_method,
                         payment_result["status"],
@@ -306,7 +370,8 @@ def register(reg: RegistrationCreate):
                 if increment_done:
                     try:
                         client.patch(
-                            f"{EVENT_SERVICE_URL}/events/{reg.event_id}/decrement-registration"
+                            f"{EVENT_SERVICE_URL}/events/{reg.event_id}/decrement-registration",
+                            headers=headers,
                         )
                     except Exception:
                         pass
@@ -321,7 +386,7 @@ def register(reg: RegistrationCreate):
             json.dumps(
                 {
                     "event": "registration_confirmed",
-                    "user_id": reg.user_id,
+                    "user_id": user_id,
                     "event_id": reg.event_id,
                     "ticket_number": ticket,
                     "registration_id": new_reg["id"],
@@ -335,7 +400,7 @@ def register(reg: RegistrationCreate):
         "registration.confirmed",
         {
             "event": "registration_confirmed",
-            "user_id": reg.user_id,
+            "user_id": user_id,
             "event_id": reg.event_id,
             "ticket_number": ticket,
             "registration_id": new_reg["id"],
@@ -346,29 +411,43 @@ def register(reg: RegistrationCreate):
 
 
 @app.get("/registrations")
-def list_registrations():
+def list_registrations(user: dict = Depends(get_current_user)):
+    if user["role"] == "super_admin":
+        with get_db() as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    "SELECT * FROM registrations ORDER BY registration_date DESC LIMIT 100"
+                )
+                regs = [_serialize_row(dict(r)) for r in cur.fetchall()]
+                return {"registrations": regs, "total": len(regs)}
     with get_db() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
-                "SELECT * FROM registrations ORDER BY registration_date DESC LIMIT 100"
+                "SELECT * FROM registrations WHERE user_id=%s ORDER BY registration_date DESC LIMIT 100",
+                (user["user_id"],),
             )
             regs = [_serialize_row(dict(r)) for r in cur.fetchall()]
             return {"registrations": regs, "total": len(regs)}
 
 
 @app.get("/registrations/{registration_id}")
-def get_registration(registration_id: int):
+def get_registration(registration_id: int, user: dict = Depends(get_current_user)):
     with get_db() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute("SELECT * FROM registrations WHERE id=%s", (registration_id,))
             reg = cur.fetchone()
             if not reg:
                 raise HTTPException(status_code=404, detail="Registration not found")
-            return _serialize_row(dict(reg))
+            reg = dict(reg)
+            if user["role"] != "super_admin" and reg["user_id"] != user["user_id"]:
+                raise HTTPException(status_code=403, detail="Access denied")
+            return _serialize_row(reg)
 
 
 @app.get("/registrations/user/{user_id}")
-def get_user_registrations(user_id: int):
+def get_user_registrations(user_id: int, user: dict = Depends(get_current_user)):
+    if user["role"] != "super_admin" and user["user_id"] != user_id:
+        raise HTTPException(status_code=403, detail="Access denied")
     with get_db() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
@@ -380,7 +459,7 @@ def get_user_registrations(user_id: int):
 
 
 @app.get("/registrations/event/{event_id}")
-def get_event_registrations(event_id: int):
+def get_event_registrations(event_id: int, user: dict = Depends(get_current_user)):
     with get_db() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
@@ -392,7 +471,11 @@ def get_event_registrations(event_id: int):
 
 
 @app.patch("/registrations/{registration_id}/payment")
-def update_payment(registration_id: int, payment: PaymentUpdate):
+def update_payment(
+    registration_id: int,
+    payment: PaymentUpdate,
+    user=Depends(require_role("super_admin")),
+):
     with get_db() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
@@ -407,15 +490,22 @@ def update_payment(registration_id: int, payment: PaymentUpdate):
 
 
 @app.post("/registrations/{registration_id}/process-payment")
-def process_registration_payment(registration_id: int, payment: PaymentProcessRequest):
+def process_registration_payment(
+    registration_id: int,
+    payment: PaymentProcessRequest,
+    user: dict = Depends(get_current_user),
+):
     with get_db() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
-                "SELECT id, payment_status FROM registrations WHERE id=%s",
+                "SELECT id, user_id, payment_status FROM registrations WHERE id=%s",
                 (registration_id,),
             )
-            if not cur.fetchone():
+            reg = cur.fetchone()
+            if not reg:
                 raise HTTPException(status_code=404, detail="Registration not found")
+            if user["role"] != "super_admin" and reg["user_id"] != user["user_id"]:
+                raise HTTPException(status_code=403, detail="Access denied")
             result = process_payment_mock(
                 payment.payment_method, payment.amount, payment.force_decline
             )
@@ -437,22 +527,34 @@ def process_registration_payment(registration_id: int, payment: PaymentProcessRe
 
 
 @app.delete("/registrations/{registration_id}")
-def cancel_registration(registration_id: int):
+def cancel_registration(registration_id: int, user: dict = Depends(get_current_user)):
+    headers = {"X-Service-Key": SERVICE_API_KEY}
     with get_db() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                "SELECT user_id, event_id FROM registrations WHERE id=%s AND status='confirmed'",
+                (registration_id,),
+            )
+            reg = cur.fetchone()
+            if not reg:
+                raise HTTPException(
+                    status_code=404,
+                    detail="Registration not found or already cancelled",
+                )
+            if user["role"] != "super_admin" and reg["user_id"] != user["user_id"]:
+                raise HTTPException(status_code=403, detail="Access denied")
+            event_id = reg["event_id"]
             cur.execute(
                 "UPDATE registrations SET status='cancelled' WHERE id=%s RETURNING id, event_id",
                 (registration_id,),
             )
             row = cur.fetchone()
-            if not row:
-                raise HTTPException(status_code=404, detail="Registration not found")
-            event_id = row["event_id"]
             conn.commit()
 
     try:
         get_http_client().patch(
-            f"{EVENT_SERVICE_URL}/events/{event_id}/decrement-registration"
+            f"{EVENT_SERVICE_URL}/events/{event_id}/decrement-registration",
+            headers=headers,
         )
     except Exception:
         pass

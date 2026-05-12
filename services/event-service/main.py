@@ -1,28 +1,44 @@
 from contextlib import contextmanager
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends, Security, Header
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from prometheus_fastapi_instrumentator import Instrumentator
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from typing import Optional
 import psycopg2
 import psycopg2.extras
 import psycopg2.pool
 import os
+import re
 import redis
 import json
+import jwt
 from datetime import datetime
 import pika
 
-app = FastAPI(title="Event Service", version="1.0.0")
+app = FastAPI(title="Event Service", version="2.0.0")
 
 Instrumentator().instrument(app).expose(app)
 
+CORS_ORIGINS = os.getenv(
+    "CORS_ORIGINS",
+    "http://localhost:8080,http://localhost:8081,http://localhost:8082",
+).split(",")
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=CORS_ORIGINS,
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+JWT_SECRET = os.getenv("JWT_SECRET", "event-mgmt-secret-change-in-prod")
+JWT_ALGORITHM = "HS256"
+SERVICE_API_KEY = os.getenv("SERVICE_API_KEY", "")
+
+security = HTTPBearer()
+security_optional = HTTPBearer(auto_error=False)
 
 _db_pool = None
 _redis_client = None
@@ -124,6 +140,57 @@ def get_db():
         pool.putconn(conn)
 
 
+def decode_token(token: str) -> dict:
+    try:
+        return jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Token expired")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+
+def get_current_user(
+    credentials: HTTPAuthorizationCredentials = Security(security),
+) -> dict:
+    return decode_token(credentials.credentials)
+
+
+def require_role(*allowed_roles):
+    def role_checker(user: dict = Depends(get_current_user)):
+        if user.get("role") not in allowed_roles:
+            raise HTTPException(
+                status_code=403,
+                detail=f"Insufficient permissions. Required: {list(allowed_roles)}, has: '{user.get('role')}'",
+            )
+        return user
+
+    return role_checker
+
+
+def verify_service_or_admin(
+    credentials: HTTPAuthorizationCredentials = Security(security_optional),
+    x_service_key: Optional[str] = Header(None, alias="X-Service-Key"),
+):
+    if x_service_key and x_service_key == SERVICE_API_KEY:
+        return {"role": "service", "user_id": 0}
+    if credentials:
+        user = decode_token(credentials.credentials)
+        if user.get("role") == "super_admin":
+            return user
+    raise HTTPException(status_code=403, detail="Access denied")
+
+
+def verify_service_or_any_user(
+    credentials: HTTPAuthorizationCredentials = Security(security_optional),
+    x_service_key: Optional[str] = Header(None, alias="X-Service-Key"),
+):
+    if x_service_key and x_service_key == SERVICE_API_KEY:
+        return {"role": "service", "user_id": 0}
+    if credentials:
+        return decode_token(credentials.credentials)
+    raise HTTPException(status_code=401, detail="Not authenticated")
+
+
 class EventCreate(BaseModel):
     title: str
     description: str
@@ -132,8 +199,38 @@ class EventCreate(BaseModel):
     end_date: str
     location: str
     max_capacity: int
-    organizer_id: int
+    organizer_id: Optional[int] = None
     ticket_price: float = 0.0
+
+    @field_validator("title")
+    @classmethod
+    def validate_title(cls, v):
+        v = v.strip()
+        if not v or len(v) > 200:
+            raise ValueError("Title must be 1-200 characters")
+        return v
+
+    @field_validator("location")
+    @classmethod
+    def validate_location(cls, v):
+        v = v.strip() if v else v
+        if v and len(v) > 200:
+            raise ValueError("Location must be at most 200 characters")
+        return v
+
+    @field_validator("max_capacity")
+    @classmethod
+    def validate_capacity(cls, v):
+        if v < 1 or v > 100000:
+            raise ValueError("Max capacity must be 1-100000")
+        return v
+
+    @field_validator("ticket_price")
+    @classmethod
+    def validate_price(cls, v):
+        if v < 0 or v > 999999:
+            raise ValueError("Ticket price must be 0-999999")
+        return v
 
 
 class EventUpdate(BaseModel):
@@ -169,6 +266,9 @@ def startup():
             cur.execute(
                 "CREATE INDEX IF NOT EXISTS idx_events_start_date ON events(start_date)"
             )
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_events_organizer ON events(organizer_id)"
+            )
         conn.commit()
 
 
@@ -178,11 +278,19 @@ def health():
 
 
 @app.post("/events")
-def create_event(event: EventCreate):
+def create_event(
+    event: EventCreate, user=Depends(require_role("organizer", "super_admin"))
+):
     start_dt = _parse_dt(event.start_date)
     end_dt = _parse_dt(event.end_date)
     if end_dt <= start_dt:
         raise HTTPException(status_code=400, detail="end_date must be after start_date")
+
+    organizer_id = event.organizer_id
+    if user["role"] == "super_admin" and organizer_id:
+        pass
+    else:
+        organizer_id = user["user_id"]
 
     with get_db() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
@@ -202,7 +310,7 @@ def create_event(event: EventCreate):
                         end_dt,
                         event.location,
                         event.max_capacity,
-                        event.organizer_id,
+                        organizer_id,
                         event.ticket_price,
                     ),
                 )
@@ -242,10 +350,22 @@ def create_event(event: EventCreate):
 
 
 @app.get("/events")
-def list_events(event_type: Optional[str] = None, status: str = "active"):
+def list_events(
+    event_type: Optional[str] = None,
+    status: str = "active",
+    user: dict = Depends(verify_service_or_any_user),
+):
     with get_db() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            if event_type:
+            if user.get("role") == "super_admin" and status == "all":
+                if event_type:
+                    cur.execute(
+                        "SELECT * FROM events WHERE event_type=%s ORDER BY start_date",
+                        (event_type,),
+                    )
+                else:
+                    cur.execute("SELECT * FROM events ORDER BY start_date")
+            elif event_type:
                 cur.execute(
                     "SELECT * FROM events WHERE status=%s AND event_type=%s ORDER BY start_date",
                     (status, event_type),
@@ -260,7 +380,7 @@ def list_events(event_type: Optional[str] = None, status: str = "active"):
 
 
 @app.get("/events/{event_id}")
-def get_event(event_id: int):
+def get_event(event_id: int, user: dict = Depends(verify_service_or_any_user)):
     with get_db() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute("SELECT * FROM events WHERE id=%s", (event_id,))
@@ -271,9 +391,28 @@ def get_event(event_id: int):
 
 
 @app.put("/events/{event_id}")
-def update_event(event_id: int, update: EventUpdate):
+def update_event(
+    event_id: int, update: EventUpdate, user: dict = Depends(get_current_user)
+):
+    if user["role"] not in ("organizer", "super_admin"):
+        raise HTTPException(
+            status_code=403, detail="Only organizers or admins can update events"
+        )
+
     with get_db() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("SELECT organizer_id FROM events WHERE id=%s", (event_id,))
+            existing = cur.fetchone()
+            if not existing:
+                raise HTTPException(status_code=404, detail="Event not found")
+            if (
+                user["role"] == "organizer"
+                and existing["organizer_id"] != user["user_id"]
+            ):
+                raise HTTPException(
+                    status_code=403, detail="You can only update your own events"
+                )
+
             fields = {k: v for k, v in update.dict().items() if v is not None}
             if not fields:
                 raise HTTPException(status_code=400, detail="No fields to update")
@@ -283,14 +422,12 @@ def update_event(event_id: int, update: EventUpdate):
                 list(fields.values()) + [event_id],
             )
             row = cur.fetchone()
-            if not row:
-                raise HTTPException(status_code=404, detail="Event not found")
             conn.commit()
             return {"message": "Event updated", "event": dict(row)}
 
 
 @app.patch("/events/{event_id}/increment-registration")
-def increment_registration(event_id: int):
+def increment_registration(event_id: int, _auth=Depends(verify_service_or_admin)):
     with get_db() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
@@ -309,7 +446,7 @@ def increment_registration(event_id: int):
 
 
 @app.patch("/events/{event_id}/decrement-registration")
-def decrement_registration(event_id: int):
+def decrement_registration(event_id: int, _auth=Depends(verify_service_or_admin)):
     with get_db() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
@@ -328,9 +465,26 @@ def decrement_registration(event_id: int):
 
 
 @app.delete("/events/{event_id}")
-def cancel_event(event_id: int):
+def cancel_event(event_id: int, user: dict = Depends(get_current_user)):
+    if user["role"] not in ("organizer", "super_admin"):
+        raise HTTPException(
+            status_code=403, detail="Only organizers or admins can cancel events"
+        )
+
     with get_db() as conn:
-        with conn.cursor() as cur:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("SELECT organizer_id FROM events WHERE id=%s", (event_id,))
+            existing = cur.fetchone()
+            if not existing:
+                raise HTTPException(status_code=404, detail="Event not found")
+            if (
+                user["role"] == "organizer"
+                and existing["organizer_id"] != user["user_id"]
+            ):
+                raise HTTPException(
+                    status_code=403, detail="You can only cancel your own events"
+                )
+
             cur.execute("UPDATE events SET status='cancelled' WHERE id=%s", (event_id,))
             conn.commit()
             return {"message": "Event cancelled"}
