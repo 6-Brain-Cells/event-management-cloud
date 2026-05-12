@@ -14,26 +14,79 @@
     <section class="card">
       <div class="card-header">
         <h2>Inbox</h2>
-        <div style="display:flex;gap:0.5rem;">
-          <span id="notif-count" class="badge info" style="display:none;"></span>
-          <button id="refresh-notifs" class="secondary" style="margin:0;">Refresh</button>
+        <div style="display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap;">
+          <label style="display:flex;align-items:center;gap:0.4rem;cursor:pointer;">
+            <input type="checkbox" id="unread-only" style="width:auto;">
+            <span style="font-size:0.82rem;color:var(--text-secondary);">Unread only</span>
+          </label>
+          <button id="mark-all-read" class="btn secondary" style="padding:0.35rem 0.7rem;font-size:0.8rem;">Mark All Read</button>
+          <button id="refresh-notifs" class="btn secondary" style="margin:0;padding:0.35rem 0.7rem;font-size:0.8rem;">Refresh</button>
         </div>
       </div>
       <div id="notifs-container">
         <div class="empty-state"><span class="empty-state-icon">⏳</span><span class="empty-state-text">Loading notifications...</span></div>
       </div>
     </section>
+
+    <div id="admin-notif-section" style="display:none;margin-top:1.5rem;">
+      <section class="card admin-section">
+        <div class="admin-badge">Admin — Create Notification</div>
+        <form id="create-notif-form" class="form-grid">
+          <div class="form-group">
+            <label for="notif-user-id">User ID</label>
+            <input type="number" id="notif-user-id" required placeholder="User ID">
+          </div>
+          <div class="form-group">
+            <label for="notif-type">Type</label>
+            <select id="notif-type">
+              <option value="reminder">Reminder</option>
+              <option value="event_created">Event</option>
+              <option value="registration_confirmed">Registration</option>
+              <option value="payment">Payment</option>
+              <option value="welcome">Welcome</option>
+            </select>
+          </div>
+          <div class="form-group span-2">
+            <label for="notif-title">Title</label>
+            <input type="text" id="notif-title" required placeholder="Notification title">
+          </div>
+          <div class="form-group span-2">
+            <label for="notif-message">Message</label>
+            <textarea id="notif-message" required rows="2" placeholder="Notification message..."></textarea>
+          </div>
+          <div class="form-actions">
+            <div id="notif-status" class="status-message"></div>
+            <button type="submit" class="btn">Send Notification</button>
+          </div>
+        </form>
+      </section>
+
+      <section class="card" style="margin-top:1.5rem;">
+        <div class="card-header">
+          <h2>Dead Letter Queue Stats</h2>
+          <button id="refresh-dlq" class="btn secondary" style="margin:0;padding:0.35rem 0.7rem;font-size:0.8rem;">Refresh</button>
+        </div>
+        <div id="dlq-content">
+          <div class="empty-state"><span class="empty-state-icon">📊</span><span class="empty-state-text">Loading DLQ stats...</span></div>
+        </div>
+      </section>
+    </div>
   </main>
 
   <footer>© 2026 EventHub — Cloud-Native Event Management Platform</footer>
 
   <script type="module">
-    import { apiCall, renderNavbar, getActiveUserId, formatRelativeTime, showToast } from './assets/api.js';
+    import { apiCall, renderNavbar, requireAuth, getUserId, isSuperAdmin, formatRelativeTime, showToast, showConfirm, openModal } from './assets/api.js';
+
+    if (!requireAuth()) throw new Error('Auth required');
     renderNavbar('notifications');
 
     const notifsContainer = document.getElementById('notifs-container');
     const refreshBtn = document.getElementById('refresh-notifs');
-    const notifCount = document.getElementById('notif-count');
+    const unreadOnly = document.getElementById('unread-only');
+    const markAllBtn = document.getElementById('mark-all-read');
+    const adminSection = document.getElementById('admin-notif-section');
+    const dlqContent = document.getElementById('dlq-content');
 
     const typeConfig = {
       registration_confirmed: { icon: '✅', color: 'green', label: 'Registration' },
@@ -49,35 +102,32 @@
       return typeConfig[type] || { icon: '📌', color: 'purple', label: type || 'Info' };
     }
 
+    let allNotifs = [];
+
     async function loadNotifications() {
-      const userId = getActiveUserId();
+      const userId = getUserId();
       if (!userId) {
-        notifsContainer.innerHTML = '<div class="empty-state"><span class="empty-state-icon">👤</span><span class="empty-state-text">Please select an Active User profile from the navigation bar.</span></div>';
+        notifsContainer.innerHTML = '<div class="empty-state"><span class="empty-state-icon">👤</span><span class="empty-state-text">Unable to load notifications.</span></div>';
         return;
       }
 
       try {
-        const data = await apiCall(`/api/notifications/user/${userId}`);
-        const notifs = data.notifications || [];
-
-        if (notifs.length > 0) {
-          notifCount.style.display = 'inline-flex';
-          notifCount.textContent = `${notifs.length} notification${notifs.length > 1 ? 's' : ''}`;
-        } else {
-          notifCount.style.display = 'none';
-        }
+        const unreadParam = unreadOnly.checked ? '?unread_only=true' : '';
+        const data = await apiCall(`/api/notifications/user/${userId}${unreadParam}`);
+        allNotifs = data.notifications || [];
 
         notifsContainer.innerHTML = '';
 
-        if (notifs.length === 0) {
-          notifsContainer.innerHTML = '<div class="empty-state"><span class="empty-state-icon">🔔</span><span class="empty-state-text">Your inbox is empty. Notifications will appear here when you register for events.</span></div>';
+        if (allNotifs.length === 0) {
+          notifsContainer.innerHTML = `<div class="empty-state"><span class="empty-state-icon">🔔</span><span class="empty-state-text">${unreadOnly.checked ? 'No unread notifications.' : 'Your inbox is empty. Notifications will appear here when you register for events.'}</span></div>`;
           return;
         }
 
-        notifs.forEach((n, idx) => {
+        allNotifs.forEach((n, idx) => {
           const tc = getTypeConfig(n.notification_type);
+          const isUnread = !n.is_read;
           const item = document.createElement('div');
-          item.className = `notification-item ${idx < 3 ? 'unread' : ''}`;
+          item.className = `notification-item ${isUnread ? 'unread' : ''}`;
           item.style.animationDelay = `${idx * 0.05}s`;
 
           item.innerHTML = `
@@ -88,23 +138,117 @@
                 <span class="notif-time">${formatRelativeTime(n.created_at)}</span>
               </div>
               <div class="notif-message">${n.message}</div>
-              <div style="margin-top:0.3rem;">
+              <div style="display:flex;gap:0.4rem;align-items:center;margin-top:0.3rem;flex-wrap:wrap;">
                 <span class="badge ${tc.color}" style="font-size:0.65rem;">${tc.label}</span>
-                <span style="font-size:0.7rem;color:var(--muted);margin-left:0.4rem;">${new Date(n.created_at).toLocaleString()}</span>
+                <span style="font-size:0.7rem;color:var(--muted);">${new Date(n.created_at).toLocaleString()}</span>
               </div>
+              ${isUnread ? `<button class="btn secondary" style="font-size:0.7rem;padding:0.2rem 0.5rem;margin-top:0.4rem;" onclick="markRead(${n.id})">Mark as Read</button>` : ''}
             </div>
           `;
           notifsContainer.appendChild(item);
         });
-
       } catch (err) {
         notifsContainer.innerHTML = '<div class="empty-state"><span class="empty-state-icon">⚠️</span><span class="empty-state-text">Error loading notifications</span></div>';
         showToast(err.message, 'error');
       }
     }
 
+    window.markRead = async function(notifId) {
+      try {
+        await apiCall(`/api/notifications/${notifId}/read`, 'PATCH');
+        loadNotifications();
+      } catch (err) {
+        showToast(err.message, 'error');
+      }
+    };
+
+    markAllBtn.addEventListener('click', async () => {
+      const unread = allNotifs.filter(n => !n.is_read);
+      if (unread.length === 0) {
+        showToast('No unread notifications', 'info');
+        return;
+      }
+
+      try {
+        await Promise.all(unread.map(n => apiCall(`/api/notifications/${n.id}/read`, 'PATCH')));
+        showToast(`Marked ${unread.length} as read`, 'success');
+        loadNotifications();
+      } catch (err) {
+        showToast(err.message, 'error');
+      }
+    });
+
+    unreadOnly.addEventListener('change', loadNotifications);
+
+    if (isSuperAdmin()) {
+      adminSection.style.display = 'block';
+      loadDLQStats();
+    }
+
+    async function loadDLQStats() {
+      try {
+        const data = await apiCall('/api/notifications/dlq/stats');
+        const stats = data.stats || data;
+
+        dlqContent.innerHTML = '';
+        const statsGrid = document.createElement('div');
+        statsGrid.className = 'stats-grid';
+        statsGrid.style.marginBottom = '0';
+
+        const entries = Object.entries(stats);
+        if (entries.length === 0) {
+          dlqContent.innerHTML = '<div class="empty-state"><span class="empty-state-icon">📊</span><span class="empty-state-text">No DLQ statistics available</span></div>';
+          return;
+        }
+
+        entries.forEach(([key, value]) => {
+          const card = document.createElement('div');
+          card.className = 'stat-card';
+          card.innerHTML = `
+            <div class="stat-icon red">📉</div>
+            <div class="stat-content">
+              <div class="stat-value">${typeof value === 'object' ? JSON.stringify(value) : value}</div>
+              <div class="stat-label">${key.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())}</div>
+            </div>
+          `;
+          statsGrid.appendChild(card);
+        });
+
+        dlqContent.appendChild(statsGrid);
+      } catch (err) {
+        dlqContent.innerHTML = '<div class="empty-state"><span class="empty-state-icon">⚠️</span><span class="empty-state-text">Error loading DLQ stats</span></div>';
+      }
+    }
+
+    document.getElementById('create-notif-form').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const btn = e.target.querySelector('button[type="submit"]');
+      const statusEl = document.getElementById('notif-status');
+      btn.disabled = true;
+      btn.innerHTML = '<span class="spinner"></span> Sending...';
+
+      try {
+        await apiCall('/api/notifications', 'POST', {
+          user_id: parseInt(document.getElementById('notif-user-id').value),
+          title: document.getElementById('notif-title').value,
+          message: document.getElementById('notif-message').value,
+          notification_type: document.getElementById('notif-type').value
+        });
+        showToast('Notification sent!', 'success');
+        e.target.reset();
+      } catch (err) {
+        statusEl.textContent = err.message;
+        statusEl.style.color = 'var(--danger)';
+        showToast(err.message, 'error');
+      } finally {
+        btn.disabled = false;
+        btn.textContent = 'Send Notification';
+      }
+    });
+
+    document.getElementById('refresh-dlq').addEventListener('click', loadDLQStats);
     refreshBtn.addEventListener('click', loadNotifications);
-    setTimeout(loadNotifications, 100);
+    loadNotifications();
   </script>
 </body>
 </html>

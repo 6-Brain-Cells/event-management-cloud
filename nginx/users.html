@@ -9,59 +9,70 @@
 <body>
   <main class="main">
     <h1 class="page-title">Users</h1>
-    <p class="page-subtitle">Manage user accounts and profiles</p>
+    <p class="page-subtitle">Manage user accounts and roles</p>
 
-    <div class="section-grid">
-      <section class="card">
-        <div class="card-header">
-          <h2>Register New User</h2>
-        </div>
-        <form id="register-form" class="form-grid">
-          <div class="form-group">
-            <label for="username">Username</label>
-            <input type="text" id="username" name="username" required placeholder="johndoe">
+    <div id="admin-section" style="display:none;">
+      <section class="card" style="margin-bottom:1.5rem;">
+        <div class="admin-badge">Admin Only — Broadcast Notification</div>
+        <form id="broadcast-form" class="form-grid">
+          <div class="form-group span-2">
+            <label for="broadcast-title">Title</label>
+            <input type="text" id="broadcast-title" required placeholder="Notification title">
           </div>
-          <div class="form-group">
-            <label for="email">Email Address</label>
-            <input type="email" id="email" name="email" required placeholder="john@example.com">
+          <div class="form-group span-2">
+            <label for="broadcast-message">Message</label>
+            <textarea id="broadcast-message" required placeholder="Broadcast message to all users..." rows="2"></textarea>
           </div>
-          <div class="form-group">
-            <label for="full_name">Full Name</label>
-            <input type="text" id="full_name" name="full_name" required placeholder="John Doe">
-          </div>
-          <div class="form-group">
-            <label for="password">Password</label>
-            <input type="password" id="password" name="password" required placeholder="••••••••">
+          <div class="form-group span-2">
+            <label for="broadcast-type">Type</label>
+            <select id="broadcast-type">
+              <option value="reminder">Reminder</option>
+              <option value="event_created">Event</option>
+              <option value="payment">Payment</option>
+              <option value="welcome">Welcome</option>
+            </select>
           </div>
           <div class="form-actions">
-            <div id="register-status" class="status-message"></div>
-            <button type="submit">Create Account</button>
+            <div id="broadcast-status" class="status-message"></div>
+            <button type="submit" class="btn">Broadcast to All Users</button>
           </div>
         </form>
       </section>
-
-      <section class="card">
-        <div class="card-header">
-          <h2>All Users</h2>
-          <button id="refresh-users" class="secondary" style="margin:0;">Refresh</button>
-        </div>
-        <div id="users-grid" class="grid-container">
-          <div class="empty-state"><span class="empty-state-icon">⏳</span><span class="empty-state-text">Loading users...</span></div>
-        </div>
-      </section>
     </div>
+
+    <section class="card">
+      <div class="card-header">
+        <h2>All Users</h2>
+        <button id="refresh-users" class="btn secondary" style="margin:0;">Refresh</button>
+      </div>
+      <div id="users-grid" class="grid-container">
+        <div class="empty-state"><span class="empty-state-icon">⏳</span><span class="empty-state-text">Loading users...</span></div>
+      </div>
+    </section>
   </main>
 
   <footer>© 2026 EventHub — Cloud-Native Event Management Platform</footer>
 
   <script type="module">
-    import { apiCall, renderNavbar, getInitials, getAvatarColor, showToast } from './assets/api.js';
+    import { apiCall, renderNavbar, requireAuth, getCurrentUser, isSuperAdmin, getInitials, getAvatarColor, showToast, showConfirm, openModal } from './assets/api.js';
+
+    if (!requireAuth()) throw new Error('Auth required');
     renderNavbar('users');
 
-    const registerForm = document.getElementById('register-form');
-    const registerStatus = document.getElementById('register-status');
     const usersGrid = document.getElementById('users-grid');
     const refreshBtn = document.getElementById('refresh-users');
+    const adminSection = document.getElementById('admin-section');
+    const currentUser = getCurrentUser();
+
+    if (isSuperAdmin()) {
+      adminSection.style.display = 'block';
+    }
+
+    const roleColors = {
+      super_admin: 'danger',
+      organizer: 'warning',
+      attendee: 'info'
+    };
 
     async function loadUsers() {
       try {
@@ -70,25 +81,46 @@
         usersGrid.innerHTML = '';
 
         if (users.length === 0) {
-          usersGrid.innerHTML = '<div class="empty-state"><span class="empty-state-icon">👤</span><span class="empty-state-text">No users yet. Create one above!</span></div>';
+          usersGrid.innerHTML = '<div class="empty-state"><span class="empty-state-icon">👤</span><span class="empty-state-text">No users found.</span></div>';
           return;
         }
 
         users.forEach(user => {
+          const isSelf = currentUser && currentUser.id === user.id;
           const card = document.createElement('div');
           card.className = 'data-card';
           card.style.flexDirection = 'row';
           card.style.alignItems = 'center';
           card.style.gap = '1rem';
+
+          let actionsHtml = '';
+          if (isSuperAdmin() && !isSelf) {
+            actionsHtml = `
+              <div class="card-actions">
+                <button class="btn secondary" style="font-size:0.75rem;padding:0.3rem 0.6rem;" onclick="changeRole(${user.id}, '${user.role}', '${user.full_name}')">Change Role</button>
+                <button class="btn danger" style="font-size:0.75rem;padding:0.3rem 0.6rem;" onclick="deleteUser(${user.id}, '${user.full_name}')">Delete</button>
+              </div>
+            `;
+          }
+
           card.innerHTML = `
             <div class="avatar ${getAvatarColor(user.id)}">${getInitials(user.full_name)}</div>
             <div style="flex:1;min-width:0;">
-              <h3 style="margin-bottom:0.1rem;">${user.full_name}</h3>
+              <div style="display:flex;align-items:center;gap:0.5rem;flex-wrap:wrap;">
+                <h3 style="margin-bottom:0;">${user.full_name}</h3>
+                ${isSelf ? '<span class="badge success" style="font-size:0.6rem;">You</span>' : ''}
+                <span class="badge ${roleColors[user.role] || 'neutral'}">${user.role}</span>
+              </div>
               <p style="font-size:0.85rem;color:var(--text-secondary);margin:0;">@${user.username}</p>
               <p style="font-size:0.8rem;color:var(--muted);margin:0;">${user.email}</p>
             </div>
-            <span class="badge neutral">#${user.id}</span>
+            <span class="badge neutral" style="flex-shrink:0;">#${user.id}</span>
           `;
+
+          const actionsDiv = document.createElement('div');
+          actionsDiv.innerHTML = actionsHtml;
+          if (actionsDiv.firstChild) card.appendChild(actionsDiv.firstChild);
+
           usersGrid.appendChild(card);
         });
       } catch (err) {
@@ -97,29 +129,60 @@
       }
     }
 
-    registerForm.addEventListener('submit', async (e) => {
-      e.preventDefault();
-      registerStatus.textContent = '';
-      const btn = registerForm.querySelector('button[type="submit"]');
-      btn.disabled = true;
-      btn.innerHTML = '<span class="spinner"></span> Creating...';
-
-      const formData = new FormData(registerForm);
-      const data = Object.fromEntries(formData.entries());
+    window.changeRole = async function(userId, currentRole, fullName) {
+      const roles = ['attendee', 'organizer', 'super_admin'];
+      const nextRole = roles[(roles.indexOf(currentRole) + 1) % roles.length];
+      const confirmed = await showConfirm(`Change ${fullName}'s role from <strong>${currentRole}</strong> to <strong>${nextRole}</strong>?`);
+      if (!confirmed) return;
 
       try {
-        await apiCall('/api/users/register', 'POST', data);
-        showToast('Account created successfully!', 'success');
-        registerForm.reset();
+        await apiCall(`/api/users/${userId}/role`, 'PUT', { role: nextRole });
+        showToast(`Role updated to ${nextRole}`, 'success');
         loadUsers();
-        setTimeout(() => window.location.reload(), 1500);
       } catch (err) {
-        registerStatus.textContent = err.message;
-        registerStatus.style.color = 'var(--danger)';
+        showToast(err.message, 'error');
+      }
+    };
+
+    window.deleteUser = async function(userId, fullName) {
+      const confirmed = await showConfirm(`Delete user <strong>${fullName}</strong>? This action cannot be undone.`);
+      if (!confirmed) return;
+
+      try {
+        await apiCall(`/api/users/${userId}`, 'DELETE');
+        showToast('User deleted', 'success');
+        loadUsers();
+      } catch (err) {
+        showToast(err.message, 'error');
+      }
+    };
+
+    document.getElementById('broadcast-form').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const statusEl = document.getElementById('broadcast-status');
+      const btn = e.target.querySelector('button[type="submit"]');
+      btn.disabled = true;
+      btn.innerHTML = '<span class="spinner"></span> Sending...';
+
+      try {
+        const usersData = await apiCall('/api/users');
+        const userIds = (usersData.users || []).map(u => u.id);
+
+        await apiCall('/api/notifications/broadcast', 'POST', {
+          user_ids: userIds,
+          title: document.getElementById('broadcast-title').value,
+          message: document.getElementById('broadcast-message').value,
+          notification_type: document.getElementById('broadcast-type').value
+        });
+        showToast(`Broadcast sent to ${userIds.length} users`, 'success');
+        e.target.reset();
+      } catch (err) {
+        statusEl.textContent = err.message;
+        statusEl.style.color = 'var(--danger)';
         showToast(err.message, 'error');
       } finally {
         btn.disabled = false;
-        btn.textContent = 'Create Account';
+        btn.textContent = 'Broadcast to All Users';
       }
     });
 

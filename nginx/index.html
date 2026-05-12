@@ -18,42 +18,13 @@
         <div class="card-header">
           <h2>Quick Actions</h2>
         </div>
-        <div class="quick-links">
-          <a href="/events.html" class="quick-link">
-            <div class="quick-link-icon purple">📅</div>
-            <div class="quick-link-text">
-              <h3>Browse Events</h3>
-              <p>Discover and register for upcoming events</p>
-            </div>
-          </a>
-          <a href="/events.html" class="quick-link">
-            <div class="quick-link-icon green">➕</div>
-            <div class="quick-link-text">
-              <h3>Host an Event</h3>
-              <p>Create and publish a new event</p>
-            </div>
-          </a>
-          <a href="/registrations.html" class="quick-link">
-            <div class="quick-link-icon blue">🎟️</div>
-            <div class="quick-link-text">
-              <h3>My Tickets</h3>
-              <p>View and manage your registrations</p>
-            </div>
-          </a>
-          <a href="/notifications.html" class="quick-link">
-            <div class="quick-link-icon yellow">🔔</div>
-            <div class="quick-link-text">
-              <h3>Notifications</h3>
-              <p>Check your alerts and reminders</p>
-            </div>
-          </a>
-        </div>
+        <div id="quick-actions" class="quick-links"></div>
       </section>
 
       <section class="card">
         <div class="card-header">
           <h2>Recent Events</h2>
-          <a href="/events.html" class="btn secondary" style="padding: 0.4rem 0.8rem; font-size: 0.8rem;">View All</a>
+          <a href="/events.html" class="btn secondary" style="padding:0.4rem 0.8rem;font-size:0.8rem;">View All</a>
         </div>
         <div id="recent-events" class="grid-container">
           <div class="empty-state"><span class="empty-state-icon">⏳</span><span class="empty-state-text">Loading events...</span></div>
@@ -65,25 +36,55 @@
   <footer>© 2026 EventHub — Cloud-Native Event Management Platform</footer>
 
   <script type="module">
-    import { apiCall, renderNavbar, getActiveUserId, getEventTypeIcon, formatCurrency, showToast } from './assets/api.js';
+    import { apiCall, renderNavbar, requireAuth, getUserId, getUserRole, isSuperAdmin, isOrganizer, getEventTypeIcon, formatCurrency, showToast } from './assets/api.js';
+
+    if (!requireAuth()) throw new Error('Auth required');
     renderNavbar('home');
 
     const statsGrid = document.getElementById('stats-grid');
     const recentEvents = document.getElementById('recent-events');
+    const quickActions = document.getElementById('quick-actions');
+    const role = getUserRole();
+
+    function renderQuickActions() {
+      const actions = [
+        { href: '/events.html', icon: '📅', iconClass: 'purple', title: 'Browse Events', desc: 'Discover and register for events' },
+      ];
+
+      if (isOrganizer()) {
+        actions.push({ href: '/events.html#create', icon: '➕', iconClass: 'green', title: 'Host an Event', desc: 'Create and publish a new event' });
+      }
+
+      actions.push({ href: '/registrations.html', icon: '🎟️', iconClass: 'blue', title: 'My Tickets', desc: 'View and manage your registrations' });
+      actions.push({ href: '/notifications.html', icon: '🔔', iconClass: 'yellow', title: 'Notifications', desc: 'Check your alerts and updates' });
+
+      if (isSuperAdmin()) {
+        actions.push({ href: '/users.html', icon: '👥', iconClass: 'red', title: 'Manage Users', desc: 'Administer user accounts and roles' });
+      }
+
+      quickActions.innerHTML = actions.map(a => `
+        <a href="${a.href}" class="quick-link">
+          <div class="quick-link-icon ${a.iconClass}">${a.icon}</div>
+          <div class="quick-link-text">
+            <h3>${a.title}</h3>
+            <p>${a.desc}</p>
+          </div>
+        </a>
+      `).join('');
+    }
 
     async function loadDashboard() {
       try {
-        const [usersData, eventsData, regsData] = await Promise.all([
-          apiCall('/api/users').catch(() => ({ users: [] })),
+        const userId = getUserId();
+        const [eventsData, regsData, notifsData] = await Promise.all([
           apiCall('/api/events').catch(() => ({ events: [] })),
-          getActiveUserId()
-            ? apiCall(`/api/registrations/user/${getActiveUserId()}`).catch(() => ({ registrations: [] }))
-            : Promise.resolve({ registrations: [] }),
+          userId ? apiCall(`/api/registrations/user/${userId}`).catch(() => ({ registrations: [] })) : Promise.resolve({ registrations: [] }),
+          userId ? apiCall(`/api/notifications/user/${userId}?unread_only=true`).catch(() => ({ notifications: [] })) : Promise.resolve({ notifications: [] }),
         ]);
 
-        const users = usersData.users || [];
         const events = eventsData.events || [];
         const regs = regsData.registrations || [];
+        const unreadNotifs = (notifsData.notifications || []).length;
         const upcomingCount = events.filter(e => new Date(e.start_date) > new Date()).length;
 
         statsGrid.innerHTML = `
@@ -102,17 +103,17 @@
             </div>
           </div>
           <div class="stat-card">
-            <div class="stat-icon blue">👥</div>
-            <div class="stat-content">
-              <div class="stat-value">${users.length}</div>
-              <div class="stat-label">Users</div>
-            </div>
-          </div>
-          <div class="stat-card">
-            <div class="stat-icon yellow">🎟️</div>
+            <div class="stat-icon blue">🎟️</div>
             <div class="stat-content">
               <div class="stat-value">${regs.length}</div>
               <div class="stat-label">My Tickets</div>
+            </div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-icon yellow">🔔</div>
+            <div class="stat-content">
+              <div class="stat-value">${unreadNotifs}</div>
+              <div class="stat-label">Unread Alerts</div>
             </div>
           </div>
         `;
@@ -141,6 +142,9 @@
               <span>📅 ${startDate}</span>
               <span>🕐 ${startTime}</span>
             </div>
+            <div class="card-actions">
+              <a href="/events.html" class="btn secondary" style="font-size:0.75rem;padding:0.3rem 0.6rem;text-decoration:none;">View Details</a>
+            </div>
           `;
           recentEvents.appendChild(card);
         });
@@ -149,6 +153,7 @@
       }
     }
 
+    renderQuickActions();
     loadDashboard();
   </script>
 </body>

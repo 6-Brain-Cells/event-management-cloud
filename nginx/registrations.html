@@ -3,21 +3,49 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>EventHub – My Tickets</title>
+  <title>EventHub – Tickets</title>
   <link rel="stylesheet" href="/assets/style.css">
 </head>
 <body>
   <main class="main">
-    <h1 class="page-title">My Tickets</h1>
+    <h1 class="page-title">Tickets & Registrations</h1>
     <p class="page-subtitle">View and manage your event registrations</p>
 
     <section class="card">
       <div class="card-header">
         <h2>Registrations</h2>
-        <button id="refresh-regs" class="secondary" style="margin:0;">Refresh</button>
+        <button id="refresh-regs" class="btn secondary" style="margin:0;">Refresh</button>
       </div>
-      <div id="regs-grid" class="grid-container">
-        <div class="empty-state"><span class="empty-state-icon">⏳</span><span class="empty-state-text">Loading your tickets...</span></div>
+
+      <div class="tab-bar" id="reg-tabs">
+        <button class="tab-btn active" data-tab="my">My Tickets</button>
+        <button class="tab-btn" data-tab="all">All Registrations</button>
+        <button class="tab-btn" data-tab="event">By Event</button>
+      </div>
+
+      <div id="tab-my">
+        <div id="my-regs-grid" class="grid-container">
+          <div class="empty-state"><span class="empty-state-icon">⏳</span><span class="empty-state-text">Loading your tickets...</span></div>
+        </div>
+        <div id="my-regs-pagination"></div>
+      </div>
+
+      <div id="tab-all" style="display:none;">
+        <div id="all-regs-grid" class="grid-container">
+          <div class="empty-state"><span class="empty-state-icon">⏳</span><span class="empty-state-text">Loading all registrations...</span></div>
+        </div>
+        <div id="all-regs-pagination"></div>
+      </div>
+
+      <div id="tab-event" style="display:none;">
+        <div class="filters-bar">
+          <select id="event-select">
+            <option value="">Select an event...</option>
+          </select>
+        </div>
+        <div id="event-regs-grid" class="grid-container">
+          <div class="empty-state"><span class="empty-state-icon">📅</span><span class="empty-state-text">Select an event to view registrations</span></div>
+        </div>
       </div>
     </section>
   </main>
@@ -25,16 +53,103 @@
   <footer>© 2026 EventHub — Cloud-Native Event Management Platform</footer>
 
   <script type="module">
-    import { apiCall, renderNavbar, getActiveUserId, formatCurrency, formatRelativeTime, showToast } from './assets/api.js';
+    import { apiCall, renderNavbar, requireAuth, getUserId, isSuperAdmin, formatCurrency, formatRelativeTime, showToast, showConfirm, renderPagination } from './assets/api.js';
+
+    if (!requireAuth()) throw new Error('Auth required');
     renderNavbar('registrations');
 
-    const regsGrid = document.getElementById('regs-grid');
+    const myRegsGrid = document.getElementById('my-regs-grid');
+    const allRegsGrid = document.getElementById('all-regs-grid');
+    const eventRegsGrid = document.getElementById('event-regs-grid');
     const refreshBtn = document.getElementById('refresh-regs');
+    const eventSelect = document.getElementById('event-select');
 
-    async function loadRegistrations() {
-      const userId = getActiveUserId();
+    const tabBtns = document.querySelectorAll('.tab-btn');
+    const tabMy = document.getElementById('tab-my');
+    const tabAll = document.getElementById('tab-all');
+    const tabEvent = document.getElementById('tab-event');
+
+    let allRegsPage = 1;
+    let allRegsTotalPages = 1;
+
+    tabBtns.forEach(btn => {
+      btn.addEventListener('click', () => {
+        tabBtns.forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        tabMy.style.display = btn.dataset.tab === 'my' ? 'block' : 'none';
+        tabAll.style.display = btn.dataset.tab === 'all' ? 'block' : 'none';
+        tabEvent.style.display = btn.dataset.tab === 'event' ? 'block' : 'none';
+
+        if (btn.dataset.tab === 'all' && isSuperAdmin()) {
+          loadAllRegistrations();
+        } else if (btn.dataset.tab === 'all' && !isSuperAdmin()) {
+          allRegsGrid.innerHTML = '<div class="empty-state"><span class="empty-state-icon">🔒</span><span class="empty-state-text">Admin access required to view all registrations</span></div>';
+        }
+      });
+    });
+
+    function getStatusBadge(status) {
+      const map = {
+        confirmed: 'success', pending: 'warning', cancelled: 'danger'
+      };
+      return `<span class="badge ${map[status] || 'neutral'}">${status}</span>`;
+    }
+
+    function getPaymentBadge(paymentStatus) {
+      const map = {
+        completed: 'success', pending: 'warning', failed: 'danger', free: 'neutral'
+      };
+      return `<span class="badge ${map[paymentStatus] || 'neutral'}">Payment: ${paymentStatus || 'N/A'}</span>`;
+    }
+
+    function renderTicketCard(r, ev, showAdmin) {
+      let statusBadge = getStatusBadge(r.status);
+      let payBadge = getPaymentBadge(r.payment_status);
+
+      let actionsHtml = '';
+      if (r.status !== 'cancelled') {
+        if (r.payment_status === 'pending' && ev && ev.ticket_price > 0) {
+          actionsHtml += `<button class="btn" style="font-size:0.75rem;padding:0.3rem 0.6rem;" onclick="processPayment(${r.id}, ${ev.ticket_price})">Pay ${formatCurrency(ev.ticket_price)}</button>`;
+        }
+        actionsHtml += `<button class="btn danger" style="font-size:0.75rem;padding:0.3rem 0.6rem;" onclick="cancelRegistration(${r.id})">Cancel</button>`;
+      }
+
+      if (showAdmin && isSuperAdmin() && r.status !== 'cancelled') {
+        actionsHtml += `<button class="btn secondary" style="font-size:0.75rem;padding:0.3rem 0.6rem;" onclick="updatePaymentStatus(${r.id}, '${r.payment_status}')">Update Payment</button>`;
+      }
+
+      return `
+        <div class="ticket-card">
+          <div class="ticket-header">
+            <div style="display:flex;gap:0.4rem;align-items:center;">
+              ${statusBadge}
+              ${ev.title ? '' : `<span class="badge neutral">Event #${r.event_id}</span>`}
+            </div>
+            <span class="badge neutral" style="font-family:monospace;">Ticket #${r.id}</span>
+          </div>
+          <div class="ticket-body">
+            ${ev.title ? `<h3 style="font-size:1rem;font-weight:700;color:#fff;margin:0;">${ev.title}</h3>` : ''}
+            ${ev.description ? `<p style="font-size:0.82rem;color:var(--text-secondary);margin:0;line-height:1.4;">${ev.description.slice(0, 120)}${ev.description.length > 120 ? '...' : ''}</p>` : ''}
+            <div class="ticket-meta">
+              ${ev.location ? `<span class="ticket-meta-item">📍 ${ev.location}</span>` : ''}
+              ${ev.start_date ? `<span class="ticket-meta-item">📅 ${new Date(ev.start_date).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}</span>` : ''}
+              <span class="ticket-meta-item">🕐 ${formatRelativeTime(r.registration_date)}</span>
+              ${r.ticket_number ? `<span class="ticket-meta-item">🎫 ${r.ticket_number}</span>` : ''}
+            </div>
+            <div style="display:flex;gap:0.4rem;align-items:center;margin-top:0.25rem;flex-wrap:wrap;">
+              ${payBadge}
+              ${r.payment_method && r.payment_method !== 'free' ? `<span class="badge neutral">${r.payment_method}</span>` : ''}
+            </div>
+            ${actionsHtml ? `<div class="ticket-actions">${actionsHtml}</div>` : ''}
+          </div>
+        </div>
+      `;
+    }
+
+    async function loadMyRegistrations() {
+      const userId = getUserId();
       if (!userId) {
-        regsGrid.innerHTML = '<div class="empty-state"><span class="empty-state-icon">👤</span><span class="empty-state-text">Please select an Active User profile from the navigation bar.</span></div>';
+        myRegsGrid.innerHTML = '<div class="empty-state"><span class="empty-state-icon">👤</span><span class="empty-state-text">Unable to load tickets.</span></div>';
         return;
       }
 
@@ -48,67 +163,89 @@
         const eventsMap = {};
         (eventsData.events || []).forEach(e => { eventsMap[e.id] = e; });
 
-        regsGrid.innerHTML = '';
+        myRegsGrid.innerHTML = '';
 
         if (regs.length === 0) {
-          regsGrid.innerHTML = '<div class="empty-state"><span class="empty-state-icon">🎟️</span><span class="empty-state-text">You have no tickets yet. Browse events to register!</span></div>';
+          myRegsGrid.innerHTML = '<div class="empty-state"><span class="empty-state-icon">🎟️</span><span class="empty-state-text">You have no tickets yet. Browse events to register!</span></div>';
           return;
         }
 
-        regs.forEach(r => {
-          const ev = eventsMap[r.event_id] || {};
-          let statusBadge = 'neutral';
-          let statusLabel = r.status;
-          if (r.status === 'confirmed') { statusBadge = 'success'; statusLabel = 'Confirmed'; }
-          if (r.status === 'pending') { statusBadge = 'warning'; statusLabel = 'Pending'; }
-          if (r.status === 'cancelled') { statusBadge = 'danger'; statusLabel = 'Cancelled'; }
-
-          let payBadge = 'neutral';
-          let payLabel = r.payment_status || 'N/A';
-          if (r.payment_status === 'completed') { payBadge = 'success'; payLabel = 'Paid'; }
-          if (r.payment_status === 'pending') { payBadge = 'warning'; payLabel = 'Pending'; }
-          if (r.payment_status === 'failed') { payBadge = 'danger'; payLabel = 'Failed'; }
-
-          const card = document.createElement('div');
-          card.className = 'ticket-card';
-          card.innerHTML = `
-            <div class="ticket-header">
-              <div style="display:flex;gap:0.4rem;align-items:center;">
-                <span class="badge ${statusBadge}">${statusLabel}</span>
-                ${ev.title ? '' : `<span class="badge neutral">Event #${r.event_id}</span>`}
-              </div>
-              <span class="badge neutral" style="font-family:monospace;">Ticket #${r.id}</span>
-            </div>
-            <div class="ticket-body">
-              ${ev.title ? `<h3 style="font-size:1rem;font-weight:700;color:#fff;margin:0;">${ev.title}</h3>` : ''}
-              ${ev.description ? `<p style="font-size:0.82rem;color:var(--text-secondary);margin:0;line-height:1.4;">${ev.description.slice(0, 120)}${ev.description.length > 120 ? '...' : ''}</p>` : ''}
-              <div class="ticket-meta">
-                ${ev.location ? `<span class="ticket-meta-item">📍 ${ev.location}</span>` : ''}
-                ${ev.start_date ? `<span class="ticket-meta-item">📅 ${new Date(ev.start_date).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}</span>` : ''}
-                <span class="ticket-meta-item">🕐 ${formatRelativeTime(r.registration_date)}</span>
-                ${r.ticket_number ? `<span class="ticket-meta-item">🎫 ${r.ticket_number}</span>` : ''}
-              </div>
-              <div style="display:flex;gap:0.4rem;align-items:center;margin-top:0.25rem;">
-                <span class="badge ${payBadge}">Payment: ${payLabel}</span>
-                ${r.payment_method && r.payment_method !== 'free' ? `<span class="badge neutral">${r.payment_method}</span>` : ''}
-              </div>
-              ${r.status !== 'cancelled' && r.payment_status === 'pending' && ev.ticket_price > 0 ? `
-                <div class="ticket-actions">
-                  <button class="btn" style="font-size:0.8rem;padding:0.4rem 0.8rem;" onclick="processPayment(${r.id}, ${ev.ticket_price})">
-                    Process Payment (${formatCurrency(ev.ticket_price)})
-                  </button>
-                </div>
-              ` : ''}
-            </div>
-          `;
-          regsGrid.appendChild(card);
-        });
-
+        myRegsGrid.innerHTML = regs.map(r => renderTicketCard(r, eventsMap[r.event_id] || {}, false)).join('');
       } catch (err) {
-        regsGrid.innerHTML = '<div class="empty-state"><span class="empty-state-icon">⚠️</span><span class="empty-state-text">Error loading tickets</span></div>';
+        myRegsGrid.innerHTML = '<div class="empty-state"><span class="empty-state-icon">⚠️</span><span class="empty-state-text">Error loading tickets</span></div>';
         showToast(err.message, 'error');
       }
     }
+
+    async function loadAllRegistrations() {
+      if (!isSuperAdmin()) return;
+
+      try {
+        const [regsData, eventsData] = await Promise.all([
+          apiCall(`/api/registrations?page=${allRegsPage}&page_size=12`),
+          apiCall('/api/events').catch(() => ({ events: [] }))
+        ]);
+
+        const regs = regsData.registrations || [];
+        allRegsTotalPages = regsData.total_pages || 1;
+        const eventsMap = {};
+        (eventsData.events || []).forEach(e => { eventsMap[e.id] = e; });
+
+        allRegsGrid.innerHTML = '';
+
+        if (regs.length === 0) {
+          allRegsGrid.innerHTML = '<div class="empty-state"><span class="empty-state-icon">🎟️</span><span class="empty-state-text">No registrations found.</span></div>';
+          return;
+        }
+
+        allRegsGrid.innerHTML = regs.map(r => renderTicketCard(r, eventsMap[r.event_id] || {}, true)).join('');
+
+        renderPagination(document.getElementById('all-regs-pagination'), allRegsPage, allRegsTotalPages, (page) => {
+          allRegsPage = page;
+          loadAllRegistrations();
+        });
+      } catch (err) {
+        allRegsGrid.innerHTML = '<div class="empty-state"><span class="empty-state-icon">⚠️</span><span class="empty-state-text">Error loading registrations</span></div>';
+        showToast(err.message, 'error');
+      }
+    }
+
+    async function loadEventDropdown() {
+      try {
+        const data = await apiCall('/api/events');
+        const events = data.events || [];
+        eventSelect.innerHTML = '<option value="">Select an event...</option>';
+        events.forEach(e => {
+          const opt = document.createElement('option');
+          opt.value = e.id;
+          opt.textContent = `${e.title} (#${e.id})`;
+          eventSelect.appendChild(opt);
+        });
+      } catch {}
+    }
+
+    eventSelect.addEventListener('change', async () => {
+      const eventId = eventSelect.value;
+      if (!eventId) {
+        eventRegsGrid.innerHTML = '<div class="empty-state"><span class="empty-state-icon">📅</span><span class="empty-state-text">Select an event to view registrations</span></div>';
+        return;
+      }
+
+      try {
+        const data = await apiCall(`/api/registrations/event/${eventId}`);
+        const regs = data.registrations || [];
+        eventRegsGrid.innerHTML = '';
+
+        if (regs.length === 0) {
+          eventRegsGrid.innerHTML = '<div class="empty-state"><span class="empty-state-icon">🎟️</span><span class="empty-state-text">No confirmed registrations for this event yet.</span></div>';
+          return;
+        }
+
+        eventRegsGrid.innerHTML = regs.map(r => renderTicketCard(r, {}, isSuperAdmin())).join('');
+      } catch (err) {
+        showToast(err.message, 'error');
+      }
+    });
 
     window.processPayment = async function(regId, amount) {
       try {
@@ -116,15 +253,48 @@
           payment_method: 'credit_card',
           amount: amount
         });
-        showToast('Payment processed successfully!', 'success');
-        loadRegistrations();
+        showToast('Payment processed!', 'success');
+        loadMyRegistrations();
       } catch (err) {
         showToast('Payment failed: ' + err.message, 'error');
       }
     };
 
-    refreshBtn.addEventListener('click', loadRegistrations);
-    setTimeout(loadRegistrations, 100);
+    window.cancelRegistration = async function(regId) {
+      const confirmed = await showConfirm('Cancel this registration? This action cannot be undone.');
+      if (!confirmed) return;
+
+      try {
+        await apiCall(`/api/registrations/${regId}`, 'DELETE');
+        showToast('Registration cancelled', 'success');
+        loadMyRegistrations();
+        if (isSuperAdmin()) loadAllRegistrations();
+      } catch (err) {
+        showToast(err.message, 'error');
+      }
+    };
+
+    window.updatePaymentStatus = async function(regId, currentStatus) {
+      const newStatus = currentStatus === 'completed' ? 'pending' : 'completed';
+      const confirmed = await showConfirm(`Update payment status to <strong>${newStatus}</strong>?`);
+      if (!confirmed) return;
+
+      try {
+        await apiCall(`/api/registrations/${regId}/payment`, 'PATCH', { payment_status: newStatus });
+        showToast('Payment status updated', 'success');
+        loadAllRegistrations();
+      } catch (err) {
+        showToast(err.message, 'error');
+      }
+    };
+
+    refreshBtn.addEventListener('click', () => {
+      loadMyRegistrations();
+      if (isSuperAdmin()) loadAllRegistrations();
+    });
+
+    loadMyRegistrations();
+    loadEventDropdown();
   </script>
 </body>
 </html>

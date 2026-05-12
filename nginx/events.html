@@ -12,10 +12,10 @@
     <p class="page-subtitle">Browse upcoming events or host your own</p>
 
     <div class="section-grid">
-      <section class="card" id="create-event-section">
+      <section class="card" id="create-event-section" style="display:none;">
         <div class="card-header" style="cursor:pointer;user-select:none;" id="toggle-form">
           <h2>Host New Event</h2>
-          <button class="secondary" type="button" id="toggle-btn" style="margin:0;">Expand</button>
+          <button class="btn secondary" type="button" id="toggle-btn" style="margin:0;">Expand</button>
         </div>
         <form id="event-form" class="form-grid" style="display:none;">
           <div class="form-group span-2">
@@ -29,9 +29,9 @@
           <div class="form-group">
             <label for="event_type">Event Type</label>
             <select id="event_type" name="event_type">
-              <option value="conference">🎤 Conference</option>
-              <option value="workshop">🛠️ Workshop</option>
-              <option value="seminar">📚 Seminar</option>
+              <option value="conference">Conference</option>
+              <option value="workshop">Workshop</option>
+              <option value="seminar">Seminar</option>
             </select>
           </div>
           <div class="form-group">
@@ -63,13 +63,26 @@
 
       <section class="card">
         <div class="card-header">
-          <h2>Upcoming Events</h2>
-          <button id="refresh-events" class="secondary" style="margin:0;">Refresh</button>
+          <h2>Events</h2>
+          <button id="refresh-events" class="btn secondary" style="margin:0;">Refresh</button>
         </div>
-        <div id="register-status" class="status-message" style="text-align:center;"></div>
+        <div class="filters-bar">
+          <select id="filter-type">
+            <option value="">All Types</option>
+            <option value="conference">Conference</option>
+            <option value="workshop">Workshop</option>
+            <option value="seminar">Seminar</option>
+          </select>
+          <select id="filter-status">
+            <option value="">All Statuses</option>
+            <option value="active">Active</option>
+            <option value="cancelled">Cancelled</option>
+          </select>
+        </div>
         <div id="events-grid" class="grid-container">
           <div class="empty-state"><span class="empty-state-icon">⏳</span><span class="empty-state-text">Loading events...</span></div>
         </div>
+        <div id="events-pagination"></div>
       </section>
     </div>
   </main>
@@ -77,16 +90,28 @@
   <footer>© 2026 EventHub — Cloud-Native Event Management Platform</footer>
 
   <script type="module">
-    import { apiCall, renderNavbar, getActiveUserId, getEventTypeIcon, formatCurrency, showToast } from './assets/api.js';
+    import { apiCall, renderNavbar, requireAuth, getUserId, getUserRole, isOrganizer, isSuperAdmin, getEventTypeIcon, formatCurrency, showToast, showConfirm, openModal, renderPagination } from './assets/api.js';
+
+    if (!requireAuth()) throw new Error('Auth required');
     renderNavbar('events');
 
     const eventForm = document.getElementById('event-form');
     const eventStatus = document.getElementById('event-status');
     const eventsGrid = document.getElementById('events-grid');
     const refreshBtn = document.getElementById('refresh-events');
-    const registerStatus = document.getElementById('register-status');
     const toggleBtn = document.getElementById('toggle-btn');
     const toggleForm = document.getElementById('toggle-form');
+    const createSection = document.getElementById('create-event-section');
+    const filterType = document.getElementById('filter-type');
+    const filterStatus = document.getElementById('filter-status');
+    const eventsPagination = document.getElementById('events-pagination');
+
+    let currentPage = 1;
+    let totalPages = 1;
+
+    if (isOrganizer()) {
+      createSection.style.display = 'block';
+    }
 
     let formVisible = false;
     toggleForm.addEventListener('click', (e) => {
@@ -97,16 +122,29 @@
       }
     });
 
+    filterType.addEventListener('change', () => { currentPage = 1; loadEvents(); });
+    filterStatus.addEventListener('change', () => { currentPage = 1; loadEvents(); });
+
     async function loadEvents() {
       try {
-        const data = await apiCall('/api/events');
+        const params = new URLSearchParams({ page: currentPage, page_size: 9 });
+        const type = filterType.value;
+        const status = filterStatus.value;
+        if (type) params.set('event_type', type);
+        if (status) params.set('status', status);
+
+        const data = await apiCall(`/api/events?${params.toString()}`);
         const events = data.events || [];
+        totalPages = data.total_pages || 1;
         eventsGrid.innerHTML = '';
 
         if (events.length === 0) {
-          eventsGrid.innerHTML = '<div class="empty-state"><span class="empty-state-icon">📭</span><span class="empty-state-text">No events available yet. Be the first to host one!</span></div>';
+          eventsGrid.innerHTML = '<div class="empty-state"><span class="empty-state-icon">📭</span><span class="empty-state-text">No events found.</span></div>';
+          eventsPagination.innerHTML = '';
           return;
         }
+
+        const userId = getUserId();
 
         events.forEach(event => {
           const card = document.createElement('div');
@@ -118,13 +156,24 @@
           const capacity = event.max_capacity || 100;
           const pct = Math.min(100, Math.round((currentRegs / capacity) * 100));
           const capClass = pct < 50 ? 'low' : pct < 80 ? 'medium' : 'high';
+          const canEdit = isSuperAdmin() || (getUserRole() === 'organizer' && event.organizer_id === userId);
+          const isCancelled = event.status === 'cancelled';
+
+          let actionsHtml = '';
+          if (!isCancelled) {
+            actionsHtml += `<button class="btn success" style="font-size:0.75rem;padding:0.3rem 0.6rem;" onclick="registerForEvent(${event.id}, ${event.ticket_price})">Register</button>`;
+          }
+          if (canEdit && !isCancelled) {
+            actionsHtml += `<button class="btn secondary" style="font-size:0.75rem;padding:0.3rem 0.6rem;" onclick="editEvent(${event.id})">Edit</button>`;
+            actionsHtml += `<button class="btn danger" style="font-size:0.75rem;padding:0.3rem 0.6rem;" onclick="cancelEvent(${event.id}, '${event.title.replace(/'/g, "\\'")}', ${event.version})">Cancel</button>`;
+          }
 
           card.innerHTML = `
             <div style="display:flex;justify-content:space-between;align-items:center;">
-              <span class="badge primary">${getEventTypeIcon(event.event_type)} ${event.event_type}</span>
+              <span class="badge primary">${event.event_type}</span>
               <span class="badge neutral">${formatCurrency(event.ticket_price)}</span>
             </div>
-            <h3>${event.title}</h3>
+            <h3>${event.title} ${isCancelled ? '<span class="badge danger">Cancelled</span>' : ''}</h3>
             <p style="font-size:0.82rem;color:var(--text-secondary);line-height:1.4;flex:1;">${event.description || 'No description'}</p>
             <div style="display:flex;gap:0.75rem;font-size:0.78rem;color:var(--muted);flex-wrap:wrap;">
               <span>📍 ${event.location || 'TBA'}</span>
@@ -140,15 +189,14 @@
                 <div class="capacity-bar-fill ${capClass}" style="width:${pct}%"></div>
               </div>
             </div>
-            <button class="register-btn success" data-id="${event.id}" data-price="${event.ticket_price}" style="width:100%;margin-top:0.25rem;">
-              Register Now
-            </button>
+            <div class="card-actions">${actionsHtml}</div>
           `;
           eventsGrid.appendChild(card);
         });
 
-        document.querySelectorAll('.register-btn').forEach(btn => {
-          btn.addEventListener('click', handleRegister);
+        renderPagination(eventsPagination, currentPage, totalPages, (page) => {
+          currentPage = page;
+          loadEvents();
         });
       } catch (err) {
         eventsGrid.innerHTML = '<div class="empty-state"><span class="empty-state-icon">⚠️</span><span class="empty-state-text">Error loading events</span></div>';
@@ -156,45 +204,117 @@
       }
     }
 
-    async function handleRegister(e) {
-      const eventId = e.target.getAttribute('data-id');
-      const price = parseFloat(e.target.getAttribute('data-price') || 0);
-      const userId = getActiveUserId();
-
-      if (!userId) {
-        showToast('Please select an Active User profile first', 'warning');
-        return;
-      }
-
-      const originalText = e.target.innerHTML;
-      e.target.innerHTML = '<span class="spinner"></span> Processing...';
-      e.target.disabled = true;
-
+    window.registerForEvent = async function(eventId, price) {
       try {
         await apiCall('/api/registrations', 'POST', {
-          user_id: parseInt(userId),
-          event_id: parseInt(eventId),
+          event_id: eventId,
           payment_method: price > 0 ? 'credit_card' : 'free'
         });
         showToast('Successfully registered!', 'success');
-        e.target.innerHTML = 'Registered ✓';
-        e.target.style.opacity = '0.6';
-        e.target.style.pointerEvents = 'none';
+        loadEvents();
       } catch (err) {
         showToast(err.message, 'error');
-        e.target.innerHTML = originalText;
-        e.target.disabled = false;
       }
-    }
+    };
+
+    window.cancelEvent = async function(eventId, title, version) {
+      const confirmed = await showConfirm(`Cancel event <strong>${title}</strong>? This action cannot be undone.`);
+      if (!confirmed) return;
+
+      try {
+        await apiCall(`/api/events/${eventId}?version=${version}`, 'DELETE');
+        showToast('Event cancelled', 'success');
+        loadEvents();
+      } catch (err) {
+        showToast(err.message, 'error');
+      }
+    };
+
+    window.editEvent = async function(eventId) {
+      try {
+        const data = await apiCall(`/api/events/${eventId}`);
+        const event = data.event || data;
+
+        const bodyHtml = `
+          <form id="edit-event-form" class="form-grid">
+            <div class="form-group span-2">
+              <label>Title</label>
+              <input type="text" id="edit-title" value="${event.title}" required>
+            </div>
+            <div class="form-group span-2">
+              <label>Description</label>
+              <textarea id="edit-description" rows="3">${event.description || ''}</textarea>
+            </div>
+            <div class="form-group">
+              <label>Type</label>
+              <select id="edit-event-type">
+                <option value="conference" ${event.event_type === 'conference' ? 'selected' : ''}>Conference</option>
+                <option value="workshop" ${event.event_type === 'workshop' ? 'selected' : ''}>Workshop</option>
+                <option value="seminar" ${event.event_type === 'seminar' ? 'selected' : ''}>Seminar</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label>Location</label>
+              <input type="text" id="edit-location" value="${event.location || ''}">
+            </div>
+            <div class="form-group">
+              <label>Start Date</label>
+              <input type="datetime-local" id="edit-start" value="${event.start_date ? event.start_date.slice(0, 16) : ''}" required>
+            </div>
+            <div class="form-group">
+              <label>End Date</label>
+              <input type="datetime-local" id="edit-end" value="${event.end_date ? event.end_date.slice(0, 16) : ''}" required>
+            </div>
+            <div class="form-group">
+              <label>Max Capacity</label>
+              <input type="number" id="edit-capacity" value="${event.max_capacity}" min="1">
+            </div>
+            <div class="form-group">
+              <label>Ticket Price ($)</label>
+              <input type="number" id="edit-price" value="${event.ticket_price}" step="0.01" min="0">
+            </div>
+          </form>
+        `;
+
+        const modal = openModal('Edit Event', bodyHtml, `
+          <button class="btn secondary modal-cancel">Cancel</button>
+          <button class="btn" id="save-edit-btn">Save Changes</button>
+        `);
+
+        modal.querySelector('.modal-cancel').onclick = () => modal.remove();
+        modal.querySelector('#save-edit-btn').addEventListener('click', async () => {
+          const btn = modal.querySelector('#save-edit-btn');
+          btn.disabled = true;
+          btn.innerHTML = '<span class="spinner"></span> Saving...';
+
+          try {
+            await apiCall(`/api/events/${eventId}`, 'PUT', {
+              title: document.getElementById('edit-title').value,
+              description: document.getElementById('edit-description').value,
+              event_type: document.getElementById('edit-event-type').value,
+              location: document.getElementById('edit-location').value,
+              start_date: document.getElementById('edit-start').value.replace('T', ' ') + ':00',
+              end_date: document.getElementById('edit-end').value.replace('T', ' ') + ':00',
+              max_capacity: parseInt(document.getElementById('edit-capacity').value),
+              ticket_price: parseFloat(document.getElementById('edit-price').value),
+              version: event.version
+            });
+            showToast('Event updated!', 'success');
+            modal.remove();
+            loadEvents();
+          } catch (err) {
+            showToast(err.message, 'error');
+            btn.disabled = false;
+            btn.textContent = 'Save Changes';
+          }
+        });
+      } catch (err) {
+        showToast(err.message, 'error');
+      }
+    };
 
     eventForm.addEventListener('submit', async (e) => {
       e.preventDefault();
-      const userId = getActiveUserId();
-      if (!userId) {
-        showToast('Please select an Active User profile first', 'warning');
-        return;
-      }
-
       const btn = eventForm.querySelector('button[type="submit"]');
       btn.disabled = true;
       btn.innerHTML = '<span class="spinner"></span> Publishing...';
@@ -203,7 +323,6 @@
       const data = Object.fromEntries(formData.entries());
       data.max_capacity = parseInt(data.max_capacity);
       data.ticket_price = parseFloat(data.ticket_price);
-      data.organizer_id = parseInt(userId);
       data.start_date = data.start_date.replace('T', ' ') + ':00';
       data.end_date = data.end_date.replace('T', ' ') + ':00';
 

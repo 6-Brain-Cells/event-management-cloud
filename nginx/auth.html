@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>EventHub – Sign In</title>
+  <link rel="stylesheet" href="/assets/style.css">
+</head>
+<body>
+  <div class="auth-container">
+    <div class="auth-card">
+      <div class="auth-logo">
+        <div class="logo-icon">⚡</div>
+        <h1>EventHub</h1>
+      </div>
+
+      <div class="auth-tabs">
+        <button class="auth-tab active" data-tab="login">Sign In</button>
+        <button class="auth-tab" data-tab="register">Register</button>
+      </div>
+
+      <form id="login-form" class="auth-form">
+        <div class="form-group">
+          <label for="login-email">Email</label>
+          <input type="email" id="login-email" required placeholder="you@example.com" autocomplete="email">
+        </div>
+        <div class="form-group">
+          <label for="login-password">Password</label>
+          <input type="password" id="login-password" required placeholder="Enter your password" autocomplete="current-password">
+        </div>
+        <div id="login-error" class="status-message" style="color:var(--danger);display:none;"></div>
+        <button type="submit" class="btn auth-submit">
+          <span class="btn-text">Sign In</span>
+          <span class="spinner" style="display:none;"></span>
+        </button>
+      </form>
+
+      <form id="register-form" class="auth-form" style="display:none;">
+        <div class="form-group">
+          <label for="reg-username">Username</label>
+          <input type="text" id="reg-username" required placeholder="Choose a username" autocomplete="username">
+        </div>
+        <div class="form-group">
+          <label for="reg-email">Email</label>
+          <input type="email" id="reg-email" required placeholder="you@example.com" autocomplete="email">
+        </div>
+        <div class="form-group">
+          <label for="reg-fullname">Full Name</label>
+          <input type="text" id="reg-fullname" required placeholder="John Doe" autocomplete="name">
+        </div>
+        <div class="form-group">
+          <label for="reg-password">Password</label>
+          <input type="password" id="reg-password" required placeholder="Min 6 characters" autocomplete="new-password">
+        </div>
+        <div id="reg-error" class="status-message" style="color:var(--danger);display:none;"></div>
+        <button type="submit" class="btn auth-submit">
+          <span class="btn-text">Create Account</span>
+          <span class="spinner" style="display:none;"></span>
+        </button>
+      </form>
+
+      <div class="auth-footer">
+        Cloud-Native Event Management Platform
+      </div>
+    </div>
+  </div>
+
+  <script type="module">
+    import { login, register, isLoggedIn, showToast, setAuth } from './assets/api.js';
+
+    if (isLoggedIn()) {
+      window.location.href = '/index.html';
+    }
+
+    const tabs = document.querySelectorAll('.auth-tab');
+    const loginForm = document.getElementById('login-form');
+    const registerForm = document.getElementById('register-form');
+
+    tabs.forEach(tab => {
+      tab.addEventListener('click', () => {
+        tabs.forEach(t => t.classList.remove('active'));
+        tab.classList.add('active');
+        const isLogin = tab.dataset.tab === 'login';
+        loginForm.style.display = isLogin ? 'flex' : 'none';
+        registerForm.style.display = isLogin ? 'none' : 'flex';
+      });
+    });
+
+    loginForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const btn = loginForm.querySelector('.btn');
+      const btnText = btn.querySelector('.btn-text');
+      const spinner = btn.querySelector('.spinner');
+      const errorEl = document.getElementById('login-error');
+      errorEl.style.display = 'none';
+      btn.disabled = true;
+      btnText.style.display = 'none';
+      spinner.style.display = 'inline-block';
+
+      try {
+        await login(
+          document.getElementById('login-email').value,
+          document.getElementById('login-password').value
+        );
+        showToast('Welcome back!', 'success');
+        setTimeout(() => window.location.href = '/index.html', 500);
+      } catch (err) {
+        errorEl.textContent = err.message;
+        errorEl.style.display = 'block';
+        btn.disabled = false;
+        btnText.style.display = 'inline';
+        spinner.style.display = 'none';
+      }
+    });
+
+    registerForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const btn = registerForm.querySelector('.btn');
+      const btnText = btn.querySelector('.btn-text');
+      const spinner = btn.querySelector('.spinner');
+      const errorEl = document.getElementById('reg-error');
+      errorEl.style.display = 'none';
+      btn.disabled = true;
+      btnText.style.display = 'none';
+      spinner.style.display = 'inline-block';
+
+      try {
+        await register({
+          username: document.getElementById('reg-username').value,
+          email: document.getElementById('reg-email').value,
+          full_name: document.getElementById('reg-fullname').value,
+          password: document.getElementById('reg-password').value,
+          role: 'attendee'
+        });
+        showToast('Account created! Please sign in.', 'success');
+        tabs[0].click();
+        loginForm.querySelector('#login-email').value = document.getElementById('reg-email').value;
+        registerForm.reset();
+      } catch (err) {
+        errorEl.textContent = err.message;
+        errorEl.style.display = 'block';
+      } finally {
+        btn.disabled = false;
+        btnText.style.display = 'inline';
+        spinner.style.display = 'none';
+      }
+    });
+  </script>
+</body>
+</html>
