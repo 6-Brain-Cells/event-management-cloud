@@ -95,8 +95,21 @@ CREATE TABLE IF NOT EXISTS events (
     organizer_id INT NOT NULL,
     ticket_price DECIMAL(10,2) DEFAULT 0.00,
     status VARCHAR(20) DEFAULT 'active',
+    version INT NOT NULL DEFAULT 1,
     created_at TIMESTAMP DEFAULT NOW()
 )
+"""
+
+DB_MIGRATION_VERSION = """
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name='events' AND column_name='version'
+    ) THEN
+        ALTER TABLE events ADD COLUMN version INT NOT NULL DEFAULT 1;
+    END IF;
+END $$;
 """
 
 
@@ -239,6 +252,7 @@ class EventUpdate(BaseModel):
     location: Optional[str] = None
     max_capacity: Optional[int] = None
     ticket_price: Optional[float] = None
+    version: int
 
 
 def _parse_dt(value: str) -> datetime:
@@ -257,19 +271,35 @@ def _serialize_row(row: dict) -> dict:
 
 @app.on_event("startup")
 def startup():
-    with get_db() as conn:
-        with conn.cursor() as cur:
-            cur.execute(DB_SCHEMA)
-            cur.execute(
-                "CREATE INDEX IF NOT EXISTS idx_events_status_type ON events(status, event_type)"
-            )
-            cur.execute(
-                "CREATE INDEX IF NOT EXISTS idx_events_start_date ON events(start_date)"
-            )
-            cur.execute(
-                "CREATE INDEX IF NOT EXISTS idx_events_organizer ON events(organizer_id)"
-            )
-        conn.commit()
+    try:
+        from alembic.config import Config as AlembicConfig
+        from alembic import command as alembic_command
+
+        alembic_cfg = AlembicConfig("alembic.ini")
+        db_url = (
+            f"postgresql://{os.getenv('DB_USER', 'postgres')}:"
+            f"{os.getenv('DB_PASSWORD', 'postgres')}@"
+            f"{os.getenv('DB_HOST', 'postgres')}:"
+            f"{os.getenv('DB_PORT', '5432')}/"
+            f"{os.getenv('DB_NAME', 'eventdb')}"
+        )
+        alembic_cfg.set_main_option("sqlalchemy.url", db_url)
+        alembic_command.upgrade(alembic_cfg, "head")
+    except Exception:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute(DB_SCHEMA)
+                cur.execute(DB_MIGRATION_VERSION)
+                cur.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_events_status_type ON events(status, event_type)"
+                )
+                cur.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_events_start_date ON events(start_date)"
+                )
+                cur.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_events_organizer ON events(organizer_id)"
+                )
+            conn.commit()
 
 
 @app.get("/health")
@@ -401,7 +431,10 @@ def update_event(
 
     with get_db() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute("SELECT organizer_id FROM events WHERE id=%s", (event_id,))
+            cur.execute(
+                "SELECT organizer_id, version FROM events WHERE id=%s",
+                (event_id,),
+            )
             existing = cur.fetchone()
             if not existing:
                 raise HTTPException(status_code=404, detail="Event not found")
@@ -412,18 +445,37 @@ def update_event(
                 raise HTTPException(
                     status_code=403, detail="You can only update your own events"
                 )
+            if existing["version"] != update.version:
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "message": "Optimistic concurrency conflict: event was modified by another request",
+                        "current_version": existing["version"],
+                        "provided_version": update.version,
+                    },
+                )
 
-            fields = {k: v for k, v in update.dict().items() if v is not None}
+            fields = {
+                k: v
+                for k, v in update.dict().items()
+                if v is not None and k != "version"
+            }
             if not fields:
                 raise HTTPException(status_code=400, detail="No fields to update")
             set_clause = ", ".join(f"{k}=%s" for k in fields)
+            set_clause += ", version=version+1"
             cur.execute(
-                f"UPDATE events SET {set_clause} WHERE id=%s RETURNING id, title, status",
-                list(fields.values()) + [event_id],
+                f"UPDATE events SET {set_clause} WHERE id=%s AND version=%s RETURNING *",
+                list(fields.values()) + [event_id, update.version],
             )
             row = cur.fetchone()
+            if not row:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Optimistic concurrency conflict: event was modified concurrently",
+                )
             conn.commit()
-            return {"message": "Event updated", "event": dict(row)}
+            return {"message": "Event updated", "event": _serialize_row(dict(row))}
 
 
 @app.patch("/events/{event_id}/increment-registration")
@@ -465,7 +517,11 @@ def decrement_registration(event_id: int, _auth=Depends(verify_service_or_admin)
 
 
 @app.delete("/events/{event_id}")
-def cancel_event(event_id: int, user: dict = Depends(get_current_user)):
+def cancel_event(
+    event_id: int,
+    version: int,
+    user: dict = Depends(get_current_user),
+):
     if user["role"] not in ("organizer", "super_admin"):
         raise HTTPException(
             status_code=403, detail="Only organizers or admins can cancel events"
@@ -473,7 +529,10 @@ def cancel_event(event_id: int, user: dict = Depends(get_current_user)):
 
     with get_db() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute("SELECT organizer_id FROM events WHERE id=%s", (event_id,))
+            cur.execute(
+                "SELECT organizer_id, version FROM events WHERE id=%s",
+                (event_id,),
+            )
             existing = cur.fetchone()
             if not existing:
                 raise HTTPException(status_code=404, detail="Event not found")
@@ -484,7 +543,24 @@ def cancel_event(event_id: int, user: dict = Depends(get_current_user)):
                 raise HTTPException(
                     status_code=403, detail="You can only cancel your own events"
                 )
+            if existing["version"] != version:
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "message": "Optimistic concurrency conflict: event was modified by another request",
+                        "current_version": existing["version"],
+                        "provided_version": version,
+                    },
+                )
 
-            cur.execute("UPDATE events SET status='cancelled' WHERE id=%s", (event_id,))
+            cur.execute(
+                "UPDATE events SET status='cancelled', version=version+1 WHERE id=%s AND version=%s",
+                (event_id, version),
+            )
+            if cur.rowcount == 0:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Optimistic concurrency conflict: event was modified concurrently",
+                )
             conn.commit()
             return {"message": "Event cancelled"}
