@@ -311,14 +311,14 @@ curl -X POST http://localhost:8080/api/events \
 
 ### `GET /api/events`
 
-List events with optional filters.
+List events with optional filters and pagination. Results are cached in Redis (30s TTL).
 
 **Auth:** Any authenticated user (service key also accepted)
 
 ```bash
 curl http://localhost:8080/api/events \
   -H "Authorization: Bearer $TOKEN"
-curl http://localhost:8080/api/events?event_type=conference&status=active \
+curl "http://localhost:8080/api/events?event_type=conference&status=active&page=1&page_size=20" \
   -H "Authorization: Bearer $TOKEN"
 ```
 
@@ -328,6 +328,19 @@ curl http://localhost:8080/api/events?event_type=conference&status=active \
 |-------|------|---------|-------------|
 | event_type | string | — | Filter by type |
 | status | string | `active` | Filter by status (`super_admin` can use `all` to see cancelled events) |
+| page | int | `1` | Page number (1-indexed) |
+| page_size | int | `20` | Items per page (max 100) |
+
+**Response (200):**
+```json
+{
+  "events": [...],
+  "total": 42,
+  "page": 1,
+  "page_size": 20,
+  "total_pages": 3
+}
+```
 
 ---
 
@@ -464,13 +477,33 @@ curl -X POST http://localhost:8080/api/registrations \
 
 ### `GET /api/registrations`
 
-List all registrations (limit 100).
+List registrations with pagination.
 
 **Auth:** Any user (scoped to own; super_admin sees all)
 
 ```bash
 curl http://localhost:8080/api/registrations \
   -H "Authorization: Bearer $TOKEN"
+curl "http://localhost:8080/api/registrations?page=2&page_size=10" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+**Query Parameters:**
+
+| Param | Type | Default | Description |
+|-------|------|---------|-------------|
+| page | int | `1` | Page number (1-indexed) |
+| page_size | int | `20` | Items per page (max 100) |
+
+**Response (200):**
+```json
+{
+  "registrations": [...],
+  "total": 15,
+  "page": 1,
+  "page_size": 20,
+  "total_pages": 1
+}
 ```
 
 ---
@@ -679,6 +712,19 @@ curl -X POST http://localhost:8080/api/notifications/broadcast \
   -H "Content-Type: application/json" \
   -d '{"user_ids": [1, 2, 3], "title": "System Update", "message": "Maintenance tonight"}'
 ```
+
+---
+
+## Redis Caching
+
+Event listing responses (`GET /api/events`) are cached in Redis to reduce database load under high traffic.
+
+**Behavior:**
+- **TTL:** 30 seconds (configurable via `CACHE_TTL` env var)
+- **Cache key format:** `events:list:{status}:{event_type}:{page}:{page_size}`
+- **Cache population:** On first request for a given filter combination, the DB result is stored in Redis
+- **Cache invalidation:** Cache is cleared on any event create, update, or delete operation
+- **Fallback:** If Redis is unavailable, the endpoint queries the database directly (graceful degradation)
 
 ---
 

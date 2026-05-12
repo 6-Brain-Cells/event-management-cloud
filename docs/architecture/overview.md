@@ -30,6 +30,7 @@ Each service is a standalone FastAPI application running in its own Docker conta
 8. **Input validation** — Pydantic field validators sanitize all user inputs at the API layer
 9. **Optimistic concurrency** — Events use a `version` column; PUT and DELETE require the current version, returning 409 on mismatch to prevent lost updates
 10. **Database migrations** — Each service runs Alembic migrations on startup with its own version table; falls back to `CREATE TABLE IF NOT EXISTS` if Alembic is unavailable
+11. **Redis caching** — Event listings cached with 30s TTL; cache invalidated on writes
 
 ---
 
@@ -119,6 +120,10 @@ Registration Service ──publish──► Redis channel: "notification_events"
 ```
 
 Redis is also used for JWT session storage — the user-service stores JWT sessions with 24h TTL (`session:<jwt>`).
+
+### Response Caching
+
+Event listings (`GET /events`) are cached in Redis with a 30-second TTL. The cache key encodes the query filters: `events:list:{status}:{event_type}:{page}:{page_size}`. The cache is invalidated whenever an event is created, updated, or deleted, ensuring stale data is served for at most 30 seconds.
 
 ---
 

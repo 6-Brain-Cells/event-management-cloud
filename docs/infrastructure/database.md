@@ -174,6 +174,52 @@ psycopg2.pool.ThreadedConnectionPool(
 
 ---
 
+## Connection Pool Tuning
+
+All 4 services now support configurable pool sizes and timeouts via environment variables:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `DB_POOL_MIN` | `2` | Minimum connections kept open in the pool |
+| `DB_POOL_MAX` | `10` | Maximum connections allowed in the pool |
+| `DB_CONNECT_TIMEOUT` | `5` | Connection establishment timeout in seconds (`connect_timeout=5s`) |
+| `DB_STATEMENT_TIMEOUT` | `5000` | Per-query timeout in milliseconds (`statement_timeout=5000ms`) |
+
+**Usage in service code:**
+```python
+psycopg2.pool.ThreadedConnectionPool(
+    minconn=int(os.getenv("DB_POOL_MIN", "2")),
+    maxconn=int(os.getenv("DB_POOL_MAX", "10")),
+    connect_timeout=int(os.getenv("DB_CONNECT_TIMEOUT", "5")),
+    options=f"-c statement_timeout={os.getenv('DB_STATEMENT_TIMEOUT', '5000')}",
+    ...
+)
+```
+
+**Tuning guidelines:**
+- Increase `DB_POOL_MAX` for services with higher concurrent traffic (e.g., event-service during popular event launches)
+- Set `DB_POOL_MIN` to match baseline traffic to avoid connection churn
+- The `statement_timeout` prevents runaway queries from consuming pool connections
+
+---
+
+## Pagination
+
+List endpoints (`GET /events`, `GET /registrations`) use `LIMIT`/`OFFSET` pagination:
+
+```sql
+SELECT * FROM events
+WHERE status = %s AND event_type = %s
+ORDER BY start_date DESC
+LIMIT %s OFFSET %s;
+```
+
+- `LIMIT` is derived from the `page_size` query parameter (default 20, max 100)
+- `OFFSET` is calculated as `(page - 1) * page_size`
+- Responses include `total`, `page`, `page_size`, and `total_pages` metadata
+
+---
+
 ## Docker Compose Configuration
 
 ```yaml

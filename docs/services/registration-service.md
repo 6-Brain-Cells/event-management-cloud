@@ -125,7 +125,22 @@ Register a user for an event with payment processing. `user_id` is derived from 
 
 ### `GET /registrations`
 
-List all registrations (most recent first, limit 100).
+List registrations with pagination (most recent first).
+
+**Query Parameters:**
+- `page` (optional, default: `1`) — Page number (1-indexed)
+- `page_size` (optional, default: `20`, max: `100`) — Items per page
+
+**Response (200):**
+```json
+{
+  "registrations": [...],
+  "total": 15,
+  "page": 1,
+  "page_size": 20,
+  "total_pages": 1
+}
+```
 
 ---
 
@@ -235,6 +250,20 @@ The registration service uses **Alembic** for database schema migrations. On sta
 ### Version Table
 
 Alembic tracks applied migrations in `alembic_version_registration` (not the default `alembic_version`) to avoid conflicts with other services sharing the same PostgreSQL database.
+
+---
+
+## Connection Pool Configuration
+
+The registration service uses configurable connection pool settings via environment variables:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `DB_POOL_MIN` | `2` | Minimum connections kept open |
+| `DB_POOL_MAX` | `10` | Maximum connections allowed |
+| `DB_CONNECT_TIMEOUT` | `5` | Connection timeout in seconds |
+
+All pool connections use `statement_timeout=5000ms` to prevent long-running queries from blocking the pool.
 
 ---
 

@@ -85,6 +85,7 @@ A microservices-based event management platform demonstrating containerization, 
 | Input validation | Pydantic field validators | Username, email, password, role validation at API layer |
 | Optimistic concurrency | `version` column on events table | PUT/DELETE require version; 409 on mismatch prevents lost updates |
 | Database migrations | Alembic per service | Version-controlled schema changes; fallback to CREATE TABLE IF NOT EXISTS on startup |
+| Redis caching | Event listing cache with 30s TTL | Reduces DB load for high-traffic list endpoints |
 | CORS | Origin whitelist via CORS_ORIGINS env var | Restrict cross-origin access to known frontend hosts |
 | Service-to-service auth | X-Service-Key header | Internal services authenticate to each other via shared key |
 
@@ -112,7 +113,7 @@ A microservices-based event management platform demonstrating containerization, 
 | Endpoint | Method | Auth | Description |
 |----------|--------|------|-------------|
 | `/events` | POST | organizer, super_admin | Create event |
-| `/events` | GET | Any user or service | List events (filter by type, status) |
+| `/events` | GET | Any user or service | List events (filter by type, status; paginated with page/page_size) |
 | `/events/{id}` | GET | Any user or service | Get event by ID |
 | `/events/{id}` | PUT | organizer (own), super_admin | Update event fields (requires `version` in body; returns 409 on conflict) |
 | `/events/{id}` | DELETE | organizer (own), super_admin | Cancel event (requires `?version=N` query param; returns 409 on conflict) |
@@ -127,7 +128,7 @@ A microservices-based event management platform demonstrating containerization, 
 | Endpoint | Method | Auth | Description |
 |----------|--------|------|-------------|
 | `/registrations` | POST | attendee, organizer, super_admin | Register for event (user_id from JWT) |
-| `/registrations` | GET | Any user (own only; super_admin sees all) | List registrations |
+| `/registrations` | GET | Any user (own only; super_admin sees all) | List registrations (paginated with page/page_size) |
 | `/registrations/{id}` | GET | Own user or super_admin | Get registration by ID |
 | `/registrations/user/{user_id}` | GET | Own user or super_admin | List registrations by user |
 | `/registrations/event/{event_id}` | GET | Any user | List confirmed registrations by event |
@@ -411,6 +412,9 @@ curl -X POST http://localhost:8080/api/events \
   -H "Authorization: Bearer $TOKEN" \
   -d '{"title":"Tech Summit","description":"Annual conference","event_type":"conference","start_date":"2026-07-01 09:00:00","end_date":"2026-07-03 18:00:00","location":"Convention Center","max_capacity":200,"ticket_price":49.99}'
 
+# List events (paginated)
+curl "http://localhost:8080/api/events?page=1&page_size=10" -H "Authorization: Bearer $TOKEN"
+
 # Update an event (requires version for optimistic concurrency)
 curl -X PUT http://localhost:8080/api/events/1 \
   -H "Content-Type: application/json" \
@@ -654,7 +658,14 @@ docker compose -f docker-compose.yml -f docker-compose.test.yml up --build test-
 
 ### Connection Pooling
 
-Each service uses `psycopg2.pool.ThreadedConnectionPool(minconn=2, maxconn=10)` to reuse database connections across requests.
+Each service uses `psycopg2.pool.ThreadedConnectionPool(minconn=2, maxconn=10)` to reuse database connections across requests. Pool sizes and timeouts are configurable via environment variables:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `DB_POOL_MIN` | `2` | Minimum connections kept open |
+| `DB_POOL_MAX` | `10` | Maximum connections allowed |
+| `DB_CONNECT_TIMEOUT` | `5` | Connection timeout in seconds |
+| `CACHE_TTL` | `30` | Redis cache TTL in seconds for event listings |
 
 ---
 

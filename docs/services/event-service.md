@@ -127,17 +127,22 @@ Create a new event. `organizer_id` defaults to JWT `user_id` unless super_admin 
 
 ### `GET /events`
 
-List events with optional filtering.
+List events with optional filtering and pagination.
 
 **Query Parameters:**
 - `event_type` (optional) — Filter by event type
 - `status` (optional, default: `active`) — Filter by status
+- `page` (optional, default: `1`) — Page number (1-indexed)
+- `page_size` (optional, default: `20`, max: `100`) — Items per page
 
 **Response (200):**
 ```json
 {
   "events": [...],
-  "total": 4
+  "total": 42,
+  "page": 1,
+  "page_size": 20,
+  "total_pages": 3
 }
 ```
 
@@ -280,6 +285,35 @@ The event service uses **Alembic** for database schema migrations. On startup, t
 ### Version Table
 
 Alembic tracks applied migrations in `alembic_version_event` (not the default `alembic_version`) to avoid conflicts with other services sharing the same PostgreSQL database.
+
+---
+
+## Redis Caching
+
+The event service caches `GET /events` responses in Redis to reduce database load.
+
+**Cache Key Format:** `events:list:{status}:{event_type}:{page}:{page_size}`
+
+**Behavior:**
+- On a list request, the service checks Redis for a cached response matching the filter combination
+- If cached, the response is returned directly without querying PostgreSQL
+- If not cached, the DB is queried and the result is stored in Redis with a 30-second TTL
+- Cache is invalidated (deleted) on any write operation: `POST /events`, `PUT /events/{id}`, `DELETE /events/{id}`
+- If Redis is unavailable, the endpoint falls back to a direct database query
+
+---
+
+## Connection Pool Configuration
+
+The event service uses configurable connection pool settings via environment variables:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `DB_POOL_MIN` | `2` | Minimum connections kept open |
+| `DB_POOL_MAX` | `10` | Maximum connections allowed |
+| `DB_CONNECT_TIMEOUT` | `5` | Connection timeout in seconds |
+
+All pool connections use `statement_timeout=5000ms` to prevent long-running queries from blocking the pool.
 
 ---
 

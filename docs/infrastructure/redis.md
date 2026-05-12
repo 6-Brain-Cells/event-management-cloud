@@ -2,9 +2,10 @@
 
 ## Overview
 
-Redis serves as a secondary pub-sub channel and token cache for the event management system. It is used for:
+Redis serves as a secondary pub-sub channel, token cache, and response cache for the event management system. It is used for:
 1. **Token storage** — Login tokens stored with TTL
 2. **Pub-Sub publishing** — Services publish events as a backup to RabbitMQ
+3. **Response caching** — Event listings cached to reduce database load
 
 | Property | Value |
 |----------|-------|
@@ -39,6 +40,33 @@ Services publish events to Redis channels as a secondary notification path:
 | registration-service | `notification_events` | `registration_confirmed`, `registration_cancelled` |
 
 **Note:** The notification-service does NOT subscribe to Redis channels — it only consumes from RabbitMQ to prevent duplicate notifications.
+
+### Event Listing Cache
+
+The event service caches `GET /events` responses in Redis to reduce database load on high-traffic list endpoints.
+
+**Cache Key Format:**
+```
+events:list:{status}:{event_type}:{page}:{page_size}
+```
+
+**Examples:**
+- `events:list:active:conference:1:20` — Active conferences, page 1
+- `events:list:all::1:10` — All events (super_admin), page 1
+
+**Configuration:**
+
+| Setting | Value | Notes |
+|---------|-------|-------|
+| TTL | 30 seconds | Configurable via `CACHE_TTL` env var |
+| Invalidation | On write | Cache keys are deleted on event create, update, or delete |
+| Fallback | Direct DB query | If Redis is unavailable, the endpoint queries PostgreSQL directly |
+
+**Behavior:**
+1. On `GET /events`, the service builds the cache key from query parameters
+2. If the key exists in Redis, the cached JSON is returned immediately
+3. If the key is missing, the service queries PostgreSQL and stores the result with TTL
+4. On `POST /events`, `PUT /events/{id}`, or `DELETE /events/{id}`, all `events:list:*` keys matching the pattern are invalidated
 
 ---
 
