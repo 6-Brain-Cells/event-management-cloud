@@ -1,30 +1,45 @@
 from contextlib import contextmanager
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends, Security
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from prometheus_fastapi_instrumentator import Instrumentator
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from typing import Optional
 import psycopg2
 import psycopg2.extras
 import psycopg2.pool
 import os
+import re
 import redis
 import json
-import secrets
-from datetime import datetime
+import jwt
+from datetime import datetime, timedelta, timezone
 import bcrypt as _bcrypt
 import pika
 
-app = FastAPI(title="User Service", version="1.0.0")
+app = FastAPI(title="User Service", version="2.0.0")
 
 Instrumentator().instrument(app).expose(app)
 
+CORS_ORIGINS = os.getenv(
+    "CORS_ORIGINS",
+    "http://localhost:8080,http://localhost:8081,http://localhost:8082",
+).split(",")
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=CORS_ORIGINS,
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+JWT_SECRET = os.getenv("JWT_SECRET", "event-mgmt-secret-change-in-prod")
+JWT_ALGORITHM = "HS256"
+JWT_EXPIRY_HOURS = 24
+VALID_ROLES = {"super_admin", "organizer", "attendee"}
+
+security = HTTPBearer()
 
 _db_pool = None
 _redis_client = None
@@ -74,6 +89,7 @@ CREATE TABLE IF NOT EXISTS users (
     email VARCHAR(100) UNIQUE NOT NULL,
     password_hash VARCHAR(200) NOT NULL,
     full_name VARCHAR(100),
+    role VARCHAR(20) DEFAULT 'attendee',
     created_at TIMESTAMP DEFAULT NOW(),
     is_active BOOLEAN DEFAULT TRUE
 )
@@ -120,16 +136,109 @@ def get_db():
         pool.putconn(conn)
 
 
+def create_jwt_token(user_data: dict) -> str:
+    payload = {
+        "user_id": user_data["id"],
+        "username": user_data.get("username", ""),
+        "email": user_data.get("email", ""),
+        "role": user_data.get("role", "attendee"),
+        "exp": datetime.now(timezone.utc) + timedelta(hours=JWT_EXPIRY_HOURS),
+        "iat": datetime.now(timezone.utc),
+    }
+    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
+
+def decode_token(token: str) -> dict:
+    try:
+        return jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Token expired")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+
+def get_current_user(
+    credentials: HTTPAuthorizationCredentials = Security(security),
+) -> dict:
+    return decode_token(credentials.credentials)
+
+
+def require_role(*allowed_roles):
+    def role_checker(user: dict = Depends(get_current_user)):
+        if user.get("role") not in allowed_roles:
+            raise HTTPException(
+                status_code=403,
+                detail=f"Insufficient permissions. Required: {list(allowed_roles)}, has: '{user.get('role')}'",
+            )
+        return user
+
+    return role_checker
+
+
 class UserCreate(BaseModel):
     username: str
     email: str
     password: str
     full_name: str
+    role: Optional[str] = "attendee"
+
+    @field_validator("username")
+    @classmethod
+    def validate_username(cls, v):
+        v = v.strip()
+        if not re.match(r"^[a-zA-Z0-9_]{3,50}$", v):
+            raise ValueError(
+                "Username must be 3-50 characters (alphanumeric and underscores only)"
+            )
+        return v
+
+    @field_validator("email")
+    @classmethod
+    def validate_email(cls, v):
+        v = v.strip().lower()
+        if not re.match(r"^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$", v):
+            raise ValueError("Invalid email format")
+        return v
+
+    @field_validator("password")
+    @classmethod
+    def validate_password(cls, v):
+        if len(v) < 8:
+            raise ValueError("Password must be at least 8 characters")
+        if len(v) > 128:
+            raise ValueError("Password must be at most 128 characters")
+        return v
+
+    @field_validator("full_name")
+    @classmethod
+    def validate_full_name(cls, v):
+        v = v.strip()
+        if not v or len(v) > 100:
+            raise ValueError("Full name must be 1-100 characters")
+        return v
+
+    @field_validator("role")
+    @classmethod
+    def validate_role(cls, v):
+        if v and v not in VALID_ROLES:
+            raise ValueError(f"Invalid role. Must be one of: {sorted(VALID_ROLES)}")
+        return v or "attendee"
 
 
 class UserLogin(BaseModel):
     email: str
     password: str
+
+
+class RoleUpdate(BaseModel):
+    role: str
+
+    @field_validator("role")
+    @classmethod
+    def validate_role(cls, v):
+        if v not in VALID_ROLES:
+            raise ValueError(f"Invalid role. Must be one of: {sorted(VALID_ROLES)}")
+        return v
 
 
 class UserUpdate(BaseModel):
@@ -153,6 +262,9 @@ def startup():
         with conn.cursor() as cur:
             cur.execute(DB_SCHEMA)
             cur.execute(
+                "ALTER TABLE users ADD COLUMN IF NOT EXISTS role VARCHAR(20) DEFAULT 'attendee'"
+            )
+            cur.execute(
                 "CREATE INDEX IF NOT EXISTS idx_users_email ON users(email) WHERE is_active=TRUE"
             )
         conn.commit()
@@ -169,12 +281,13 @@ def register(user: UserCreate):
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             try:
                 cur.execute(
-                    "INSERT INTO users (username, email, password_hash, full_name) VALUES (%s, %s, %s, %s) RETURNING id, username, email, full_name, created_at",
+                    "INSERT INTO users (username, email, password_hash, full_name, role) VALUES (%s, %s, %s, %s, %s) RETURNING id, username, email, full_name, role, created_at",
                     (
                         user.username,
                         user.email,
                         hash_password(user.password),
                         user.full_name,
+                        user.role,
                     ),
                 )
                 new_user = dict(cur.fetchone())
@@ -220,7 +333,7 @@ def login(credentials: UserLogin):
     with get_db() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
-                "SELECT id, username, email, full_name, password_hash FROM users WHERE email=%s AND is_active=TRUE",
+                "SELECT id, username, email, full_name, role, password_hash FROM users WHERE email=%s AND is_active=TRUE",
                 (credentials.email,),
             )
             user = cur.fetchone()
@@ -230,37 +343,55 @@ def login(credentials: UserLogin):
                 raise HTTPException(status_code=401, detail="Invalid credentials")
             user.pop("password_hash", None)
 
-    token = secrets.token_hex(32)
+    token = create_jwt_token(dict(user))
+
     try:
         r = get_redis()
-        r.setex(f"token:{token}", 86400, json.dumps(dict(user)))
+        r.setex(f"session:{token}", JWT_EXPIRY_HOURS * 3600, json.dumps(dict(user)))
     except Exception:
         pass
+
     return {"token": token, "user": dict(user)}
 
 
-@app.get("/users/{user_id}")
-def get_user(user_id: int):
+@app.get("/users/me")
+def get_current_user_profile(user: dict = Depends(get_current_user)):
     with get_db() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
-                "SELECT id, username, email, full_name, created_at FROM users WHERE id=%s AND is_active=TRUE",
+                "SELECT id, username, email, full_name, role, created_at FROM users WHERE id=%s AND is_active=TRUE",
+                (user["user_id"],),
+            )
+            db_user = cur.fetchone()
+            if not db_user:
+                raise HTTPException(status_code=404, detail="User not found")
+            result = dict(db_user)
+            result["created_at"] = str(result["created_at"])
+            return result
+
+
+@app.get("/users/{user_id}")
+def get_user(user_id: int, user: dict = Depends(get_current_user)):
+    with get_db() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                "SELECT id, username, email, full_name, role, created_at FROM users WHERE id=%s AND is_active=TRUE",
                 (user_id,),
             )
-            user = cur.fetchone()
-            if not user:
+            db_user = cur.fetchone()
+            if not db_user:
                 raise HTTPException(status_code=404, detail="User not found")
-            result = dict(user)
+            result = dict(db_user)
             result["created_at"] = str(result["created_at"])
             return result
 
 
 @app.get("/users")
-def list_users():
+def list_users(user: dict = Depends(get_current_user)):
     with get_db() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
-                "SELECT id, username, email, full_name, created_at FROM users WHERE is_active=TRUE ORDER BY id"
+                "SELECT id, username, email, full_name, role, created_at FROM users WHERE is_active=TRUE ORDER BY id"
             )
             users = [dict(r) for r in cur.fetchall()]
             for u in users:
@@ -268,8 +399,29 @@ def list_users():
             return {"users": users, "total": len(users)}
 
 
+@app.put("/users/{user_id}/role")
+def update_user_role(
+    user_id: int, role_update: RoleUpdate, user=Depends(require_role("super_admin"))
+):
+    with get_db() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                "UPDATE users SET role=%s WHERE id=%s AND is_active=TRUE RETURNING id, username, email, role",
+                (role_update.role, user_id),
+            )
+            updated = cur.fetchone()
+            if not updated:
+                raise HTTPException(status_code=404, detail="User not found")
+            conn.commit()
+            return {"message": "Role updated", "user": dict(updated)}
+
+
 @app.delete("/users/{user_id}")
-def delete_user(user_id: int):
+def delete_user(user_id: int, user: dict = Depends(get_current_user)):
+    if user["role"] != "super_admin" and user["user_id"] != user_id:
+        raise HTTPException(
+            status_code=403, detail="Can only deactivate your own account"
+        )
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute(
