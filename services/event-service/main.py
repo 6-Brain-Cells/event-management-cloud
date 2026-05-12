@@ -1,5 +1,5 @@
 from contextlib import contextmanager
-from fastapi import FastAPI, HTTPException, Depends, Security, Header
+from fastapi import FastAPI, HTTPException, Depends, Security, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from prometheus_fastapi_instrumentator import Instrumentator
@@ -13,11 +13,40 @@ import re
 import redis
 import json
 import jwt
-from datetime import datetime
+import logging
+import uuid
+import time
+from datetime import datetime, timezone
+import sys
 import pika
 import math
 
-app = FastAPI(title="Event Service", version="2.0.0")
+
+class JSONFormatter(logging.Formatter):
+    def format(self, record):
+        log_entry = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "level": record.levelname,
+            "service": "event-service",
+            "message": record.getMessage(),
+            "logger": record.name,
+        }
+        if hasattr(record, "correlation_id"):
+            log_entry["correlation_id"] = record.correlation_id
+        if record.exc_info and record.exc_info[0]:
+            log_entry["exception"] = self.formatException(record.exc_info)
+        return json.dumps(log_entry)
+
+
+_handler = logging.StreamHandler(sys.stderr)
+_handler.setFormatter(JSONFormatter())
+logging.basicConfig(
+    handlers=[_handler], level=os.getenv("LOG_LEVEL", "INFO").upper(), force=True
+)
+
+logger = logging.getLogger(__name__)
+
+app = FastAPI(title="Event Service", version="3.0.0")
 
 Instrumentator().instrument(app).expose(app)
 
@@ -33,6 +62,22 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def correlation_id_middleware(request: Request, call_next):
+    correlation_id = request.headers.get("X-Correlation-ID", str(uuid.uuid4()))
+    request.state.correlation_id = correlation_id
+    start_time = time.time()
+    response = await call_next(request)
+    duration = time.time() - start_time
+    response.headers["X-Correlation-ID"] = correlation_id
+    logger.info(
+        f"{request.method} {request.url.path} {response.status_code} {duration:.3f}s",
+        extra={"correlation_id": correlation_id},
+    )
+    return response
+
 
 JWT_SECRET = os.getenv("JWT_SECRET", "event-mgmt-secret-change-in-prod")
 JWT_ALGORITHM = "HS256"
@@ -324,8 +369,15 @@ def health():
 
 @app.post("/events")
 def create_event(
-    event: EventCreate, user=Depends(require_role("organizer", "super_admin"))
+    event: EventCreate,
+    request: Request,
+    user=Depends(require_role("organizer", "super_admin")),
 ):
+    correlation_id = getattr(request.state, "correlation_id", "unknown")
+    logger.info(
+        f"Event creation attempt: title='{event.title}' by user_id={user['user_id']}",
+        extra={"correlation_id": correlation_id},
+    )
     start_dt = _parse_dt(event.start_date)
     end_dt = _parse_dt(event.end_date)
     if end_dt <= start_dt:
@@ -363,6 +415,10 @@ def create_event(
                 conn.commit()
             except Exception as e:
                 conn.rollback()
+                logger.error(
+                    f"Event creation failed: {e}",
+                    extra={"correlation_id": correlation_id},
+                )
                 raise HTTPException(status_code=400, detail=str(e))
 
     try:
@@ -393,6 +449,10 @@ def create_event(
 
     _invalidate_events_cache()
 
+    logger.info(
+        f"Event created: id={new_event['id']} title='{new_event['title']}' organizer_id={organizer_id}",
+        extra={"correlation_id": correlation_id},
+    )
     return {"message": "Event created", "event": new_event}
 
 

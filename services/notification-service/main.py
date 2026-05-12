@@ -1,5 +1,5 @@
 from contextlib import contextmanager
-from fastapi import FastAPI, HTTPException, Depends, Security
+from fastapi import FastAPI, HTTPException, Depends, Security, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from prometheus_fastapi_instrumentator import Instrumentator
@@ -13,9 +13,41 @@ import json
 import jwt
 import threading
 import pika
-from datetime import datetime
+import logging
+import uuid
+import time
+from datetime import datetime, timezone
+import sys
 
-app = FastAPI(title="Notification Service", version="2.0.0")
+
+class JSONFormatter(logging.Formatter):
+    def format(self, record):
+        log_entry = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "level": record.levelname,
+            "service": "notification-service",
+            "message": record.getMessage(),
+            "logger": record.name,
+        }
+        if hasattr(record, "correlation_id"):
+            log_entry["correlation_id"] = record.correlation_id
+        if record.exc_info and record.exc_info[0]:
+            log_entry["exception"] = self.formatException(record.exc_info)
+        return json.dumps(log_entry)
+
+
+_handler = logging.StreamHandler(sys.stderr)
+_handler.setFormatter(JSONFormatter())
+logging.basicConfig(
+    handlers=[_handler], level=os.getenv("LOG_LEVEL", "INFO").upper(), force=True
+)
+
+logger = logging.getLogger(__name__)
+
+DLQ_MAX_RETRIES = int(os.getenv("DLQ_MAX_RETRIES", "3"))
+DLQ_BACKOFF_BASE = float(os.getenv("DLQ_BACKOFF_BASE", "1.0"))
+
+app = FastAPI(title="Notification Service", version="3.0.0")
 
 Instrumentator().instrument(app).expose(app)
 
@@ -31,6 +63,22 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def correlation_id_middleware(request: Request, call_next):
+    correlation_id = request.headers.get("X-Correlation-ID", str(uuid.uuid4()))
+    request.state.correlation_id = correlation_id
+    start_time = time.time()
+    response = await call_next(request)
+    duration = time.time() - start_time
+    response.headers["X-Correlation-ID"] = correlation_id
+    logger.info(
+        f"{request.method} {request.url.path} {response.status_code} {duration:.3f}s",
+        extra={"correlation_id": correlation_id},
+    )
+    return response
+
 
 JWT_SECRET = os.getenv("JWT_SECRET", "event-mgmt-secret-change-in-prod")
 JWT_ALGORITHM = "HS256"
@@ -134,7 +182,11 @@ def save_notification(user_id: int, title: str, message: str, notification_type:
                 )
             conn.commit()
     except Exception as e:
-        print(f"[NOTIFY] Error saving notification: {e}")
+        logger.error(
+            f"Error saving notification: {e}",
+            extra={"correlation_id": "rabbitmq"},
+        )
+        raise
 
 
 def _handle_message(data: dict):
@@ -154,9 +206,23 @@ def _handle_message(data: dict):
             notification_type="info",
         )
     elif event_type == "event_created":
-        print(f"[NOTIFY] New event created: {data.get('title')}")
+        logger.info(
+            f"New event created: {data.get('title')}",
+            extra={"correlation_id": "rabbitmq"},
+        )
     elif event_type == "registration_cancelled":
-        print(f"[NOTIFY] Registration cancelled: {data.get('registration_id')}")
+        logger.info(
+            f"Registration cancelled: {data.get('registration_id')}",
+            extra={"correlation_id": "rabbitmq"},
+        )
+
+
+def _get_retry_count(headers):
+    if headers and "x-death" in headers:
+        x_death_list = headers["x-death"]
+        if isinstance(x_death_list, list) and len(x_death_list) > 0:
+            return x_death_list[0].get("count", 0)
+    return 0
 
 
 def rabbitmq_consumer():
@@ -174,7 +240,22 @@ def rabbitmq_consumer():
         conn = pika.BlockingConnection(params)
         ch = conn.channel()
         ch.exchange_declare(exchange="events", exchange_type="topic", durable=True)
-        result = ch.queue_declare(queue="notification_queue", durable=True)
+
+        ch.queue_declare(queue="notification_dlx", durable=True)
+        ch.exchange_declare(exchange="events.dlx", exchange_type="direct", durable=True)
+        ch.queue_bind(
+            queue="notification_dlx",
+            exchange="events.dlx",
+            routing_key="notification_queue",
+        )
+
+        args = {
+            "x-dead-letter-exchange": "events.dlx",
+            "x-dead-letter-routing-key": "notification_queue",
+        }
+        result = ch.queue_declare(
+            queue="notification_queue", durable=True, arguments=args
+        )
         queue_name = result.method.queue
         for routing_key in [
             "user.registered",
@@ -187,21 +268,39 @@ def rabbitmq_consumer():
         def callback(ch, method, properties, body):
             try:
                 data = json.loads(body.decode("utf-8"))
-                print(
-                    f"[NOTIFY-RMQ] Received {method.routing_key}: {data.get('event')}"
+                logger.info(
+                    f"Received {method.routing_key}: {data.get('event')}",
+                    extra={"correlation_id": "rabbitmq"},
                 )
                 _handle_message(data)
                 ch.basic_ack(delivery_tag=method.delivery_tag)
             except Exception as e:
-                print(f"[NOTIFY-RMQ] Error: {e}")
-                ch.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
+                retry_count = _get_retry_count(properties.headers)
+                logger.error(
+                    f"Message processing failed (attempt {retry_count + 1}): {e}",
+                    extra={"correlation_id": "rabbitmq"},
+                )
+                if retry_count + 1 >= DLQ_MAX_RETRIES:
+                    logger.error(
+                        f"Message sent to DLQ after {retry_count + 1} failures: {body.decode('utf-8', errors='replace')}",
+                        extra={"correlation_id": "rabbitmq"},
+                    )
+                    ch.basic_reject(delivery_tag=method.delivery_tag, requeue=False)
+                else:
+                    ch.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
 
         ch.basic_qos(prefetch_count=10)
         ch.basic_consume(queue=queue_name, on_message_callback=callback)
-        print("[NOTIFY-RMQ] Consuming from RabbitMQ notification_queue")
+        logger.info(
+            "Consuming from RabbitMQ notification_queue with DLQ support",
+            extra={"correlation_id": "system"},
+        )
         ch.start_consuming()
     except Exception as e:
-        print(f"[NOTIFY-RMQ] RabbitMQ consumer error: {e}")
+        logger.error(
+            f"RabbitMQ consumer error: {e}",
+            extra={"correlation_id": "system"},
+        )
 
 
 @app.on_event("startup")
@@ -313,3 +412,45 @@ def broadcast(req: BroadcastRequest, user=Depends(require_role("super_admin"))):
             )
             conn.commit()
             return {"message": f"Broadcast sent to {len(req.user_ids)} users"}
+
+
+@app.get("/notifications/dlq/stats")
+def dlq_stats(user=Depends(require_role("super_admin"))):
+    try:
+        params = pika.ConnectionParameters(
+            host=os.getenv("RABBITMQ_HOST", "rabbitmq"),
+            port=int(os.getenv("RABBITMQ_PORT", "5672")),
+            credentials=pika.PlainCredentials(
+                os.getenv("RABBITMQ_USER", "guest"),
+                os.getenv("RABBITMQ_PASSWORD", "guest"),
+            ),
+        )
+        conn = pika.BlockingConnection(params)
+        ch = conn.channel()
+        try:
+            dlq_info = ch.queue_declare(queue="notification_dlx", passive=True)
+            main_info = ch.queue_declare(queue="notification_queue", passive=True)
+            stats = {
+                "dead_letter_queue": {
+                    "name": "notification_dlx",
+                    "message_count": dlq_info.method.message_count,
+                },
+                "main_queue": {
+                    "name": "notification_queue",
+                    "message_count": main_info.method.message_count,
+                },
+                "dlq_max_retries": DLQ_MAX_RETRIES,
+            }
+        except pika.exceptions.ChannelClosedByBroker:
+            stats = {
+                "dead_letter_queue": {"name": "notification_dlx", "message_count": 0},
+                "main_queue": {"name": "notification_queue", "message_count": 0},
+                "dlq_max_retries": DLQ_MAX_RETRIES,
+                "note": "Queues not yet initialized",
+            }
+            conn.close()
+        else:
+            conn.close()
+        return stats
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"Could not query RabbitMQ: {e}")

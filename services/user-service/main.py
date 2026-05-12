@@ -1,5 +1,5 @@
 from contextlib import contextmanager
-from fastapi import FastAPI, HTTPException, Depends, Security
+from fastapi import FastAPI, HTTPException, Depends, Security, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from prometheus_fastapi_instrumentator import Instrumentator
@@ -13,11 +13,40 @@ import re
 import redis
 import json
 import jwt
+import logging
+import uuid
+import time
 from datetime import datetime, timedelta, timezone
+import sys
 import bcrypt as _bcrypt
 import pika
 
-app = FastAPI(title="User Service", version="2.0.0")
+
+class JSONFormatter(logging.Formatter):
+    def format(self, record):
+        log_entry = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "level": record.levelname,
+            "service": "user-service",
+            "message": record.getMessage(),
+            "logger": record.name,
+        }
+        if hasattr(record, "correlation_id"):
+            log_entry["correlation_id"] = record.correlation_id
+        if record.exc_info and record.exc_info[0]:
+            log_entry["exception"] = self.formatException(record.exc_info)
+        return json.dumps(log_entry)
+
+
+_handler = logging.StreamHandler(sys.stderr)
+_handler.setFormatter(JSONFormatter())
+logging.basicConfig(
+    handlers=[_handler], level=os.getenv("LOG_LEVEL", "INFO").upper(), force=True
+)
+
+logger = logging.getLogger(__name__)
+
+app = FastAPI(title="User Service", version="3.0.0")
 
 Instrumentator().instrument(app).expose(app)
 
@@ -33,6 +62,22 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def correlation_id_middleware(request: Request, call_next):
+    correlation_id = request.headers.get("X-Correlation-ID", str(uuid.uuid4()))
+    request.state.correlation_id = correlation_id
+    start_time = time.time()
+    response = await call_next(request)
+    duration = time.time() - start_time
+    response.headers["X-Correlation-ID"] = correlation_id
+    logger.info(
+        f"{request.method} {request.url.path} {response.status_code} {duration:.3f}s",
+        extra={"correlation_id": correlation_id},
+    )
+    return response
+
 
 JWT_SECRET = os.getenv("JWT_SECRET", "event-mgmt-secret-change-in-prod")
 JWT_ALGORITHM = "HS256"
@@ -293,7 +338,12 @@ def health():
 
 
 @app.post("/users/register")
-def register(user: UserCreate):
+def register(user: UserCreate, request: Request):
+    correlation_id = getattr(request.state, "correlation_id", "unknown")
+    logger.info(
+        f"Registration attempt: username={user.username} email={user.email}",
+        extra={"correlation_id": correlation_id},
+    )
     with get_db() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             try:
@@ -312,6 +362,10 @@ def register(user: UserCreate):
                 conn.commit()
             except psycopg2.IntegrityError:
                 conn.rollback()
+                logger.warning(
+                    f"Registration failed - duplicate: username={user.username} email={user.email}",
+                    extra={"correlation_id": correlation_id},
+                )
                 raise HTTPException(
                     status_code=400, detail="Username or email already exists"
                 )
@@ -342,11 +396,16 @@ def register(user: UserCreate):
         },
     )
 
+    logger.info(
+        f"User registered: id={new_user['id']} username={new_user['username']}",
+        extra={"correlation_id": correlation_id},
+    )
     return {"message": "User registered successfully", "user": new_user}
 
 
 @app.post("/users/login")
-def login(credentials: UserLogin):
+def login(credentials: UserLogin, request: Request):
+    correlation_id = getattr(request.state, "correlation_id", "unknown")
     with get_db() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
@@ -357,6 +416,10 @@ def login(credentials: UserLogin):
             if not user or not verify_password(
                 credentials.password, user["password_hash"]
             ):
+                logger.warning(
+                    f"Login failed: email={credentials.email}",
+                    extra={"correlation_id": correlation_id},
+                )
                 raise HTTPException(status_code=401, detail="Invalid credentials")
             user.pop("password_hash", None)
 
@@ -368,6 +431,10 @@ def login(credentials: UserLogin):
     except Exception:
         pass
 
+    logger.info(
+        f"User logged in: id={user['id']} username={user['username']}",
+        extra={"correlation_id": correlation_id},
+    )
     return {"token": token, "user": dict(user)}
 
 

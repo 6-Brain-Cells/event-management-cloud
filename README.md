@@ -69,6 +69,9 @@ A microservices-based event management platform demonstrating containerization, 
 | **Cache/Pub-Sub** | Redis | Services publish to Redis channels as secondary notification path |
 | **API Gateway** | Nginx | All external traffic routes through nginx with rate limiting |
 | **Service-to-service** | X-Service-Key header | Registration service authenticates to event-service for capacity operations |
+| **Circuit breaker** | Custom (registration → event-service) | Opens after 5 failures, 30s recovery, half-open with 3 probe successes |
+| **Dead Letter Queue** | RabbitMQ DLX | Failed notification messages retry 3x then route to `notification_dlx` queue |
+| **Correlation IDs** | X-Correlation-ID header | Propagated through nginx to all services; returned in response headers |
 
 ### Design Decisions
 
@@ -88,6 +91,9 @@ A microservices-based event management platform demonstrating containerization, 
 | Redis caching | Event listing cache with 30s TTL | Reduces DB load for high-traffic list endpoints |
 | CORS | Origin whitelist via CORS_ORIGINS env var | Restrict cross-origin access to known frontend hosts |
 | Service-to-service auth | X-Service-Key header | Internal services authenticate to each other via shared key |
+| Circuit breaker | Custom implementation in registration-service | Protects event-service calls: opens after 5 failures, 30s recovery, half-open with 3 successes |
+| Dead Letter Queue | RabbitMQ DLX + notification_dlx queue | Failed messages retry up to 3 times, then routed to DLQ for inspection |
+| Structured logging | JSON formatter with correlation IDs | All services log structured JSON with timestamp, service, level, correlation_id; X-Correlation-ID header propagated through nginx |
 
 ---
 
@@ -135,7 +141,7 @@ A microservices-based event management platform demonstrating containerization, 
 | `/registrations/{id}/payment` | PATCH | super_admin | Update payment status |
 | `/registrations/{id}/process-payment` | POST | Own user or super_admin | Retry payment processing |
 | `/registrations/{id}` | DELETE | Own user or super_admin | Cancel registration |
-| `/health` | GET | Public | Service health check |
+| `/health` | GET | Public | Service health check + circuit breaker state |
 
 **Publishes:** `registration.confirmed`, `registration.cancelled` to RabbitMQ
 
@@ -149,9 +155,10 @@ A microservices-based event management platform demonstrating containerization, 
 | `/notifications/user/{user_id}` | GET | Own user or super_admin | List notifications by user |
 | `/notifications/{id}/read` | PATCH | Own user or super_admin | Mark notification as read |
 | `/notifications/broadcast` | POST | super_admin | Send notification to multiple users |
+| `/notifications/dlq/stats` | GET | super_admin | Dead Letter Queue statistics |
 | `/health` | GET | Public | Service health check |
 
-**Consumes:** All routing keys from `events` exchange via `notification_queue` (RabbitMQ consumer thread)
+**Consumes:** All routing keys from `events` exchange via `notification_queue` (RabbitMQ consumer thread with DLQ support)
 
 ---
 
@@ -310,7 +317,7 @@ event-management-cloud/
 
 Contains four independent FastAPI microservices. Each service has its own Dockerfile, requirements.txt, and .dockerignore. Services are independently deployable and scale horizontally.
 
-- **Shared patterns across all services:** DB connection pooling (`ThreadedConnectionPool`), Redis singleton, RabbitMQ publisher, Prometheus instrumentation, CORS middleware (origin whitelist), JWT authentication, RBAC role checking, Pydantic input validation, health endpoint, Alembic database migrations (with fallback to `CREATE TABLE IF NOT EXISTS`)
+- **Shared patterns across all services:** DB connection pooling (`ThreadedConnectionPool`), Redis singleton, RabbitMQ publisher, Prometheus instrumentation, CORS middleware (origin whitelist), JWT authentication, RBAC role checking, Pydantic input validation, health endpoint, Alembic database migrations (with fallback to `CREATE TABLE IF NOT EXISTS`), structured JSON logging with correlation IDs (`X-Correlation-ID` header propagated through nginx)
 - **Each service owns its own table** but shares the same PostgreSQL database
 - **Each service has its own Alembic migration chain** with separate version tables (`alembic_version_user`, `alembic_version_event`, `alembic_version_registration`, `alembic_version_notification`) to avoid conflicts in the shared database
 
@@ -321,6 +328,7 @@ API gateway and static frontend. Routes external requests to internal services, 
 - **Rate limits:** Auth endpoints (5 req/s), API endpoints (30 req/s)
 - **Timeouts:** Connect 5s, read 30s, send 30s
 - **Static caching:** JS/CSS/images cached 7 days
+- **Header forwarding:** Authorization, X-Service-Key, X-Correlation-ID
 
 ### `monitoring/`
 
@@ -540,11 +548,12 @@ On payment failure, the system automatically performs a compensating transaction
 
 ### Log Aggregation
 
-Promtail collects container logs from Docker and ships them to Loki. Query in Grafana Explore:
+All services emit structured JSON logs with fields: `timestamp`, `level`, `service`, `message`, `correlation_id`. Promtail collects container logs from Docker and ships them to Loki. Query in Grafana Explore:
 
 ```
 {service="user-service"}
 {service="registration-service"} |= "error"
+{service="notification-service"} | json | correlation_id="abc-123"
 ```
 
 ---
@@ -630,6 +639,9 @@ docker compose -f docker-compose.yml -f docker-compose.test.yml up --build test-
 - Service-to-service authentication via X-Service-Key
 - Optimistic concurrency: stale version on PUT/DELETE returns 409 with conflict details
 - Database migrations: Alembic migrations apply on startup, fallback to CREATE TABLE IF NOT EXISTS
+- Circuit breaker: registration-service health shows breaker state (closed/open/half_open), failure count
+- Dead Letter Queue: notification-service DLQ stats endpoint shows message counts
+- Correlation IDs: X-Correlation-ID header propagated through nginx, returned in response headers
 
 ---
 
@@ -666,6 +678,11 @@ Each service uses `psycopg2.pool.ThreadedConnectionPool(minconn=2, maxconn=10)` 
 | `DB_POOL_MAX` | `10` | Maximum connections allowed |
 | `DB_CONNECT_TIMEOUT` | `5` | Connection timeout in seconds |
 | `CACHE_TTL` | `30` | Redis cache TTL in seconds for event listings |
+| `CB_FAILURE_THRESHOLD` | `5` | Failures before circuit breaker opens |
+| `CB_RECOVERY_TIMEOUT` | `30` | Seconds before circuit breaker enters half-open |
+| `CB_HALF_OPEN_MAX` | `3` | Successful calls in half-open to close breaker |
+| `DLQ_MAX_RETRIES` | `3` | Max message processing retries before DLQ |
+| `DLQ_BACKOFF_BASE` | `1.0` | Base backoff seconds for retry delays |
 
 ---
 

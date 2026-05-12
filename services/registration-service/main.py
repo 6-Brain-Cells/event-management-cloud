@@ -1,5 +1,5 @@
 from contextlib import contextmanager
-from fastapi import FastAPI, HTTPException, Depends, Security
+from fastapi import FastAPI, HTTPException, Depends, Security, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from prometheus_fastapi_instrumentator import Instrumentator
@@ -19,9 +19,135 @@ import string
 import secrets
 import pika
 import math
-from datetime import datetime
+import logging
+import uuid
+import time
+from datetime import datetime, timezone
+import sys
 
-app = FastAPI(title="Registration Service", version="2.0.0")
+
+class JSONFormatter(logging.Formatter):
+    def format(self, record):
+        log_entry = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "level": record.levelname,
+            "service": "registration-service",
+            "message": record.getMessage(),
+            "logger": record.name,
+        }
+        if hasattr(record, "correlation_id"):
+            log_entry["correlation_id"] = record.correlation_id
+        if record.exc_info and record.exc_info[0]:
+            log_entry["exception"] = self.formatException(record.exc_info)
+        return json.dumps(log_entry)
+
+
+_handler = logging.StreamHandler(sys.stderr)
+_handler.setFormatter(JSONFormatter())
+logging.basicConfig(
+    handlers=[_handler], level=os.getenv("LOG_LEVEL", "INFO").upper(), force=True
+)
+
+logger = logging.getLogger(__name__)
+
+
+class CircuitBreaker:
+    def __init__(self, failure_threshold=5, recovery_timeout=30, half_open_max=3):
+        self.failure_threshold = failure_threshold
+        self.recovery_timeout = recovery_timeout
+        self.half_open_max = half_open_max
+        self.failure_count = 0
+        self.last_failure_time = None
+        self.state = "closed"
+        self.half_open_calls = 0
+        self.half_open_successes = 0
+
+    def _is_open(self):
+        if self.state == "open":
+            if (
+                self.last_failure_time
+                and time.time() - self.last_failure_time >= self.recovery_timeout
+            ):
+                self.state = "half_open"
+                self.half_open_calls = 0
+                self.half_open_successes = 0
+                logger.info(
+                    "Circuit breaker transitioning to half_open",
+                    extra={"correlation_id": "system"},
+                )
+                return False
+            return True
+        return False
+
+    def call(self, func, *args, **kwargs):
+        if self._is_open():
+            logger.warning(
+                "Circuit breaker is OPEN, rejecting call",
+                extra={"correlation_id": kwargs.get("_correlation_id", "unknown")},
+            )
+            raise HTTPException(
+                status_code=503,
+                detail="Event service temporarily unavailable (circuit breaker open)",
+            )
+        try:
+            result = func(*args, **kwargs)
+            self._on_success()
+            return result
+        except (httpx.ConnectError, httpx.TimeoutException) as e:
+            self._on_failure(str(e), kwargs.get("_correlation_id", "unknown"))
+            raise HTTPException(status_code=503, detail="Event service unavailable")
+        except HTTPException:
+            raise
+        except Exception as e:
+            self._on_failure(str(e), kwargs.get("_correlation_id", "unknown"))
+            raise
+
+    def _on_success(self):
+        if self.state == "half_open":
+            self.half_open_successes += 1
+            if self.half_open_successes >= self.half_open_max:
+                self.state = "closed"
+                self.failure_count = 0
+                logger.info(
+                    "Circuit breaker CLOSED (recovered)",
+                    extra={"correlation_id": "system"},
+                )
+        else:
+            self.failure_count = 0
+
+    def _on_failure(self, error: str, correlation_id: str):
+        self.failure_count += 1
+        self.last_failure_time = time.time()
+        if self.state == "half_open":
+            self.state = "open"
+            logger.error(
+                f"Circuit breaker re-opened from half_open: {error}",
+                extra={"correlation_id": correlation_id},
+            )
+        elif self.failure_count >= self.failure_threshold:
+            self.state = "open"
+            logger.error(
+                f"Circuit breaker OPENED after {self.failure_count} failures",
+                extra={"correlation_id": correlation_id},
+            )
+
+    def get_state(self):
+        self._is_open()
+        return {
+            "state": self.state,
+            "failure_count": self.failure_count,
+            "failure_threshold": self.failure_threshold,
+            "recovery_timeout": self.recovery_timeout,
+        }
+
+
+event_service_circuit_breaker = CircuitBreaker(
+    failure_threshold=int(os.getenv("CB_FAILURE_THRESHOLD", "5")),
+    recovery_timeout=int(os.getenv("CB_RECOVERY_TIMEOUT", "30")),
+    half_open_max=int(os.getenv("CB_HALF_OPEN_MAX", "3")),
+)
+
+app = FastAPI(title="Registration Service", version="3.0.0")
 
 Instrumentator().instrument(app).expose(app)
 
@@ -37,6 +163,22 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def correlation_id_middleware(request: Request, call_next):
+    correlation_id = request.headers.get("X-Correlation-ID", str(uuid.uuid4()))
+    request.state.correlation_id = correlation_id
+    start_time = time.time()
+    response = await call_next(request)
+    duration = time.time() - start_time
+    response.headers["X-Correlation-ID"] = correlation_id
+    logger.info(
+        f"{request.method} {request.url.path} {response.status_code} {duration:.3f}s",
+        extra={"correlation_id": correlation_id},
+    )
+    return response
+
 
 JWT_SECRET = os.getenv("JWT_SECRET", "event-mgmt-secret-change-in-prod")
 JWT_ALGORITHM = "HS256"
@@ -295,35 +437,55 @@ def startup():
 
 @app.get("/health")
 def health():
-    return {"status": "healthy", "service": "registration-service"}
+    cb_state = event_service_circuit_breaker.get_state()
+    return {
+        "status": "healthy",
+        "service": "registration-service",
+        "circuit_breaker": cb_state,
+    }
+
+
+def _call_event_service(method: str, path: str, correlation_id: str):
+    client = get_http_client()
+    headers = {"X-Service-Key": SERVICE_API_KEY, "X-Correlation-ID": correlation_id}
+    if method == "GET":
+        return client.get(f"{EVENT_SERVICE_URL}{path}", headers=headers)
+    elif method == "PATCH":
+        return client.patch(f"{EVENT_SERVICE_URL}{path}", headers=headers)
 
 
 @app.post("/registrations")
 def register(
     reg: RegistrationCreate,
+    request: Request,
     user=Depends(require_role("attendee", "organizer", "super_admin")),
 ):
+    correlation_id = getattr(request.state, "correlation_id", "unknown")
     user_id = user["user_id"]
-    client = get_http_client()
-    headers = {"X-Service-Key": SERVICE_API_KEY}
+    logger.info(
+        f"Registration attempt: user_id={user_id} event_id={reg.event_id}",
+        extra={"correlation_id": correlation_id},
+    )
 
     try:
-        event_resp = client.get(
-            f"{EVENT_SERVICE_URL}/events/{reg.event_id}", headers=headers
+        event_resp = event_service_circuit_breaker.call(
+            _call_event_service, "GET", f"/events/{reg.event_id}", correlation_id
         )
         if event_resp.status_code == 404:
             raise HTTPException(status_code=404, detail="Event not found")
         if event_resp.status_code != 200:
             raise HTTPException(status_code=400, detail="Could not fetch event details")
         event_data = event_resp.json()
-    except httpx.ConnectError:
-        raise HTTPException(status_code=503, detail="Event service unavailable")
+    except HTTPException:
+        raise
 
     increment_done = False
     try:
-        resp = client.patch(
-            f"{EVENT_SERVICE_URL}/events/{reg.event_id}/increment-registration",
-            headers=headers,
+        resp = event_service_circuit_breaker.call(
+            _call_event_service,
+            "PATCH",
+            f"/events/{reg.event_id}/increment-registration",
+            correlation_id,
         )
         if resp.status_code == 409:
             raise HTTPException(status_code=409, detail="Event is full")
@@ -332,20 +494,26 @@ def register(
                 status_code=400, detail="Could not verify event capacity"
             )
         increment_done = True
-    except httpx.ConnectError:
-        raise HTTPException(status_code=503, detail="Event service unavailable")
+    except HTTPException:
+        raise
 
     amount = float(event_data.get("ticket_price") or 0)
     payment_result = process_payment_mock(reg.payment_method or "free", amount)
     if payment_result["status"] != "paid":
         if increment_done:
             try:
-                client.patch(
-                    f"{EVENT_SERVICE_URL}/events/{reg.event_id}/decrement-registration",
-                    headers=headers,
+                event_service_circuit_breaker.call(
+                    _call_event_service,
+                    "PATCH",
+                    f"/events/{reg.event_id}/decrement-registration",
+                    correlation_id,
                 )
             except Exception:
                 pass
+        logger.warning(
+            f"Payment failed for user_id={user_id} event_id={reg.event_id}",
+            extra={"correlation_id": correlation_id},
+        )
         raise HTTPException(
             status_code=402,
             detail={
@@ -387,9 +555,11 @@ def register(
                 conn.rollback()
                 if increment_done:
                     try:
-                        client.patch(
-                            f"{EVENT_SERVICE_URL}/events/{reg.event_id}/decrement-registration",
-                            headers=headers,
+                        event_service_circuit_breaker.call(
+                            _call_event_service,
+                            "PATCH",
+                            f"/events/{reg.event_id}/decrement-registration",
+                            correlation_id,
                         )
                     except Exception:
                         pass
@@ -425,6 +595,10 @@ def register(
         },
     )
 
+    logger.info(
+        f"Registration successful: user_id={user_id} event_id={reg.event_id} ticket={ticket}",
+        extra={"correlation_id": correlation_id},
+    )
     return {"message": "Registration successful", "registration": new_reg}
 
 
@@ -579,8 +753,14 @@ def process_registration_payment(
 
 
 @app.delete("/registrations/{registration_id}")
-def cancel_registration(registration_id: int, user: dict = Depends(get_current_user)):
-    headers = {"X-Service-Key": SERVICE_API_KEY}
+def cancel_registration(
+    registration_id: int, request: Request, user: dict = Depends(get_current_user)
+):
+    correlation_id = getattr(request.state, "correlation_id", "unknown")
+    logger.info(
+        f"Cancellation attempt: registration_id={registration_id} user_id={user.get('user_id')}",
+        extra={"correlation_id": correlation_id},
+    )
     with get_db() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
@@ -604,12 +784,17 @@ def cancel_registration(registration_id: int, user: dict = Depends(get_current_u
             conn.commit()
 
     try:
-        get_http_client().patch(
-            f"{EVENT_SERVICE_URL}/events/{event_id}/decrement-registration",
-            headers=headers,
+        event_service_circuit_breaker.call(
+            _call_event_service,
+            "PATCH",
+            f"/events/{event_id}/decrement-registration",
+            correlation_id,
         )
     except Exception:
-        pass
+        logger.warning(
+            f"Failed to decrement event capacity for event_id={event_id}",
+            extra={"correlation_id": correlation_id},
+        )
 
     publish_event(
         "registration.cancelled",
@@ -620,4 +805,8 @@ def cancel_registration(registration_id: int, user: dict = Depends(get_current_u
         },
     )
 
+    logger.info(
+        f"Registration cancelled: registration_id={registration_id} event_id={event_id}",
+        extra={"correlation_id": correlation_id},
+    )
     return {"message": "Registration cancelled"}
