@@ -346,32 +346,50 @@ curl http://localhost:8080/api/events/1 \
 
 ### `PUT /api/events/{event_id}`
 
-Update event fields.
+Update event fields. Requires optimistic concurrency via `version` field.
 
 **Auth:** organizer (own events only) or super_admin
+
+**Request Body:**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| title | string | no | New title |
+| description | string | no | New description |
+| location | string | no | New location |
+| max_capacity | int | no | New capacity |
+| ticket_price | float | no | New price |
+| version | int | **yes** | Current version of the event (for optimistic concurrency) |
 
 ```bash
 curl -X PUT http://localhost:8080/api/events/1 \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"title": "Updated Title", "max_capacity": 300}'
+  -d '{"title": "Updated Title", "max_capacity": 300, "version": 1}'
 ```
 
 **Errors:**
 | Status | Detail |
 |--------|--------|
 | 403 | Insufficient permissions (not the event owner or super_admin) |
+| 409 | Optimistic concurrency conflict (version mismatch). Returns `{"message": "...", "current_version": N, "provided_version": M}` |
 
 ---
 
 ### `DELETE /api/events/{event_id}`
 
-Cancel an event.
+Cancel an event. Requires optimistic concurrency via `version` query parameter.
 
 **Auth:** organizer (own events only) or super_admin
 
+**Query Parameters:**
+
+| Param | Type | Required | Description |
+|-------|------|----------|-------------|
+| version | int | **yes** | Current version of the event (for optimistic concurrency) |
+
 ```bash
-curl -X DELETE http://localhost:8080/api/events/1 \
+curl -X DELETE "http://localhost:8080/api/events/1?version=2" \
   -H "Authorization: Bearer $TOKEN"
 ```
 
@@ -379,6 +397,7 @@ curl -X DELETE http://localhost:8080/api/events/1 \
 | Status | Detail |
 |--------|--------|
 | 403 | Insufficient permissions (not the event owner or super_admin) |
+| 409 | Optimistic concurrency conflict (version mismatch). Returns `{"message": "...", "current_version": N, "provided_version": M}` |
 
 ---
 

@@ -8,10 +8,11 @@ Manages events: creation, retrieval, updates, cancellation, and capacity trackin
 |----------|-------|
 | **Port** | 8000 (internal), 8002 (dev exposed) |
 | **Framework** | FastAPI |
-| **Database Table** | `events` |
+| **Database Table** | `events` (includes `version` column for optimistic concurrency) |
 | **RabbitMQ Publishing** | `event.created` |
 | **Dockerfile** | Multi-stage `python:3.11-slim` |
 | **Auth** | JWT + X-Service-Key for inter-service calls |
+| **Concurrency** | Optimistic locking via `version` column (PUT/DELETE return 409 on conflict) |
 
 ---
 
@@ -21,7 +22,10 @@ Manages events: creation, retrieval, updates, cancellation, and capacity trackin
 |------|-------------|
 | `main.py` | Application code: models, routes, DB schema, capacity management, RabbitMQ publisher |
 | `Dockerfile` | Multi-stage build |
-| `requirements.txt` | fastapi, uvicorn, psycopg2-binary, redis, pika, prometheus-fastapi-instrumentator |
+| `requirements.txt` | fastapi, uvicorn, psycopg2-binary, redis, pika, alembic, sqlalchemy, prometheus-fastapi-instrumentator |
+| `alembic.ini` | Alembic configuration (version_table: `alembic_version_event`) |
+| `alembic/env.py` | Migration environment with service-specific version table |
+| `alembic/versions/001_create_events_table.py` | Initial migration: creates events table with version column and indexes |
 | `.dockerignore` | Excludes build artifacts |
 
 ---
@@ -42,6 +46,7 @@ CREATE TABLE IF NOT EXISTS events (
     organizer_id INT NOT NULL,
     ticket_price DECIMAL(10,2) DEFAULT 0.00,
     status VARCHAR(20) DEFAULT 'active',
+    version INT NOT NULL DEFAULT 1,
     created_at TIMESTAMP DEFAULT NOW()
 );
 
@@ -149,7 +154,7 @@ Get event by ID.
 
 ### `PUT /events/{event_id}`
 
-Update event fields. Organizers can only update their own events; super_admin can update any.
+Update event fields. Organizers can only update their own events; super_admin can update any. Requires `version` in request body for optimistic concurrency control.
 
 **Requires:** Bearer token (organizer — own events only, or super_admin)
 
@@ -158,9 +163,13 @@ Update event fields. Organizers can only update their own events; super_admin ca
 {
   "title": "Updated Title",
   "description": "Updated description",
-  "max_capacity": 300
+  "max_capacity": 300,
+  "version": 1
 }
 ```
+
+**Errors:**
+- `409` — Version conflict (event was modified by another request; client should fetch latest and retry)
 
 ---
 
@@ -197,9 +206,15 @@ Atomically decrement `registered_count` (floor at 0). Used as a compensating tra
 
 ### `DELETE /events/{event_id}`
 
-Cancel event (sets `status='cancelled'`). Organizers can only cancel their own events; super_admin can cancel any.
+Cancel event (sets `status='cancelled'`). Organizers can only cancel their own events; super_admin can cancel any. Requires `?version=N` query parameter for optimistic concurrency control.
 
 **Requires:** Bearer token (organizer — own events only, or super_admin)
+
+**Query Parameters:**
+- `version` (required) — Current version of the event for optimistic locking
+
+**Errors:**
+- `409` — Version conflict (event was modified by another request)
 
 ---
 
@@ -231,6 +246,43 @@ This prevents race conditions where multiple users register simultaneously.
 
 ---
 
+## Optimistic Concurrency Control
+
+The events table uses a `version` column to prevent lost updates when multiple clients modify the same event simultaneously.
+
+**Mechanism:**
+- Every row starts with `version = 1`
+- `PUT` and `DELETE` operations include the current `version` in the request
+- The SQL `WHERE` clause includes `AND version = %s`; the update also sets `version = version + 1`
+- If the `WHERE` clause matches zero rows, the service returns `409 Conflict`
+
+**SQL Pattern:**
+```sql
+UPDATE events SET title = %s, ..., version = version + 1
+WHERE id = %s AND version = %s
+RETURNING *;
+```
+
+**Client Workflow:** Fetch event → note `version` → send update with `version` → if 409, re-fetch and retry.
+
+---
+
+## Database Migrations
+
+The event service uses **Alembic** for database schema migrations. On startup, the `startup()` function attempts to run `alembic upgrade head` first. If Alembic fails, it falls back to executing `CREATE TABLE IF NOT EXISTS` SQL directly.
+
+### Migration Chain
+
+| Version | File | Description |
+|---------|------|-------------|
+| `001_events` | `alembic/versions/001_create_events_table.py` | Creates `events` table with `version` column and indexes |
+
+### Version Table
+
+Alembic tracks applied migrations in `alembic_version_event` (not the default `alembic_version`) to avoid conflicts with other services sharing the same PostgreSQL database.
+
+---
+
 ## Dependencies
 
 ```
@@ -240,5 +292,7 @@ psycopg2-binary
 redis
 pika
 PyJWT>=2.8.0
+alembic>=1.13.0
+sqlalchemy>=2.0.0
 prometheus-fastapi-instrumentator
 ```

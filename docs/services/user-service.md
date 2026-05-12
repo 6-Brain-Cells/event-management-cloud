@@ -21,7 +21,10 @@ Manages user accounts: registration, authentication, profile retrieval, and soft
 |------|-------------|
 | `main.py` | Application code: models, routes, DB schema, RabbitMQ publisher, Redis client |
 | `Dockerfile` | Multi-stage build: builder + runtime with non-root user |
-| `requirements.txt` | fastapi, uvicorn, psycopg2-binary, redis, pika, bcrypt, prometheus-fastapi-instrumentator |
+| `requirements.txt` | fastapi, uvicorn, psycopg2-binary, redis, pika, bcrypt, PyJWT, alembic, sqlalchemy, prometheus-fastapi-instrumentator |
+| `alembic.ini` | Alembic configuration (version_table: `alembic_version_user`) |
+| `alembic/env.py` | Migration environment with service-specific version table |
+| `alembic/versions/001_create_users_table.py` | Initial migration: creates users table and email index |
 | `.dockerignore` | Excludes `__pycache__`, `.venv`, `.git`, `__pycache__` |
 
 ---
@@ -243,6 +246,22 @@ Update a user's role. super_admin only.
 
 ---
 
+## Database Migrations
+
+The user service uses **Alembic** for database schema migrations. On startup, the `startup()` function attempts to run `alembic upgrade head` first. If Alembic fails, it falls back to executing `CREATE TABLE IF NOT EXISTS` SQL directly.
+
+### Migration Chain
+
+| Version | File | Description |
+|---------|------|-------------|
+| `001_users` | `alembic/versions/001_create_users_table.py` | Creates `users` table and `idx_users_email` index |
+
+### Version Table
+
+Alembic tracks applied migrations in `alembic_version_user` (not the default `alembic_version`) to avoid conflicts with other services sharing the same PostgreSQL database.
+
+---
+
 ## Dependencies
 
 ```
@@ -253,5 +272,7 @@ redis
 pika
 bcrypt
 PyJWT>=2.8.0
+alembic>=1.13.0
+sqlalchemy>=2.0.0
 prometheus-fastapi-instrumentator
 ```

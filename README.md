@@ -83,6 +83,8 @@ A microservices-based event management platform demonstrating containerization, 
 | Authentication | JWT (PyJWT, HS256, 24h expiry) | Stateless auth with role claims, Redis session store |
 | Authorization | RBAC with 3 roles (super_admin, organizer, attendee) | Role-based access control enforced per endpoint |
 | Input validation | Pydantic field validators | Username, email, password, role validation at API layer |
+| Optimistic concurrency | `version` column on events table | PUT/DELETE require version; 409 on mismatch prevents lost updates |
+| Database migrations | Alembic per service | Version-controlled schema changes; fallback to CREATE TABLE IF NOT EXISTS on startup |
 | CORS | Origin whitelist via CORS_ORIGINS env var | Restrict cross-origin access to known frontend hosts |
 | Service-to-service auth | X-Service-Key header | Internal services authenticate to each other via shared key |
 
@@ -112,8 +114,8 @@ A microservices-based event management platform demonstrating containerization, 
 | `/events` | POST | organizer, super_admin | Create event |
 | `/events` | GET | Any user or service | List events (filter by type, status) |
 | `/events/{id}` | GET | Any user or service | Get event by ID |
-| `/events/{id}` | PUT | organizer (own), super_admin | Update event fields |
-| `/events/{id}` | DELETE | organizer (own), super_admin | Cancel event |
+| `/events/{id}` | PUT | organizer (own), super_admin | Update event fields (requires `version` in body; returns 409 on conflict) |
+| `/events/{id}` | DELETE | organizer (own), super_admin | Cancel event (requires `?version=N` query param; returns 409 on conflict) |
 | `/events/{id}/increment-registration` | PATCH | Service key or super_admin | Atomically increment registered_count |
 | `/events/{id}/decrement-registration` | PATCH | Service key or super_admin | Atomically decrement registered_count |
 | `/health` | GET | Public | Service health check |
@@ -170,6 +172,8 @@ A microservices-based event management platform demonstrating containerization, 
 | **Password** | bcrypt | Latest | Secure password hashing |
 | **Messaging** | pika | Latest | RabbitMQ client |
 | **Auth** | PyJWT | 2.8.0+ | JWT token generation and validation (HS256) |
+| **Migrations** | Alembic | 1.13.0+ | Database schema migrations per service |
+| **Migrations ORM** | SQLAlchemy | 2.0.0+ | Required by Alembic for migration engine |
 | **Metrics** | prometheus-fastapi-instrumentator | Latest | Auto-instrument HTTP metrics |
 | **Containerization** | Docker | — | Multi-stage builds |
 | **Orchestration** | Kubernetes (Minikube) | — | Production deployment |
@@ -197,21 +201,45 @@ event-management-cloud/
 │   │   ├── main.py                         # FastAPI app, routes, models, DB schema
 │   │   ├── Dockerfile                      # Multi-stage build
 │   │   ├── requirements.txt                # Python dependencies
+│   │   ├── alembic.ini                     # Alembic config (version_table: alembic_version_user)
+│   │   ├── alembic/                        # Database migrations
+│   │   │   ├── env.py                      # Migration environment
+│   │   │   ├── script.py.mako             # Migration script template
+│   │   │   └── versions/
+│   │   │       └── 001_create_users_table.py
 │   │   └── .dockerignore
 │   ├── event-service/
 │   │   ├── main.py
 │   │   ├── Dockerfile
 │   │   ├── requirements.txt
+│   │   ├── alembic.ini                     # Alembic config (version_table: alembic_version_event)
+│   │   ├── alembic/
+│   │   │   ├── env.py
+│   │   │   ├── script.py.mako
+│   │   │   └── versions/
+│   │   │       └── 001_create_events_table.py  # Includes version column + migration
 │   │   └── .dockerignore
 │   ├── registration-service/
 │   │   ├── main.py
 │   │   ├── Dockerfile
 │   │   ├── requirements.txt
+│   │   ├── alembic.ini                     # Alembic config (version_table: alembic_version_registration)
+│   │   ├── alembic/
+│   │   │   ├── env.py
+│   │   │   ├── script.py.mako
+│   │   │   └── versions/
+│   │   │       └── 001_create_registrations_table.py
 │   │   └── .dockerignore
 │   └── notification-service/
 │       ├── main.py
 │       ├── Dockerfile
 │       ├── requirements.txt
+│       ├── alembic.ini                     # Alembic config (version_table: alembic_version_notification)
+│       ├── alembic/
+│       │   ├── env.py
+│       │   ├── script.py.mako
+│       │   └── versions/
+│       │       └── 001_create_notifications_table.py
 │       └── .dockerignore
 │
 ├── nginx/                                  # API Gateway + Frontend
@@ -281,8 +309,9 @@ event-management-cloud/
 
 Contains four independent FastAPI microservices. Each service has its own Dockerfile, requirements.txt, and .dockerignore. Services are independently deployable and scale horizontally.
 
-- **Shared patterns across all services:** DB connection pooling (`ThreadedConnectionPool`), Redis singleton, RabbitMQ publisher, Prometheus instrumentation, CORS middleware (origin whitelist), JWT authentication, RBAC role checking, Pydantic input validation, health endpoint, auto-creating DB schema on startup
+- **Shared patterns across all services:** DB connection pooling (`ThreadedConnectionPool`), Redis singleton, RabbitMQ publisher, Prometheus instrumentation, CORS middleware (origin whitelist), JWT authentication, RBAC role checking, Pydantic input validation, health endpoint, Alembic database migrations (with fallback to `CREATE TABLE IF NOT EXISTS`)
 - **Each service owns its own table** but shares the same PostgreSQL database
+- **Each service has its own Alembic migration chain** with separate version tables (`alembic_version_user`, `alembic_version_event`, `alembic_version_registration`, `alembic_version_notification`) to avoid conflicts in the shared database
 
 ### `nginx/`
 
@@ -381,6 +410,16 @@ curl -X POST http://localhost:8080/api/events \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $TOKEN" \
   -d '{"title":"Tech Summit","description":"Annual conference","event_type":"conference","start_date":"2026-07-01 09:00:00","end_date":"2026-07-03 18:00:00","location":"Convention Center","max_capacity":200,"ticket_price":49.99}'
+
+# Update an event (requires version for optimistic concurrency)
+curl -X PUT http://localhost:8080/api/events/1 \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{"title":"Tech Summit 2026","version":1}'
+
+# Cancel an event (requires version query param)
+curl -X DELETE "http://localhost:8080/api/events/1?version=2" \
+  -H "Authorization: Bearer $TOKEN"
 
 # Register for event (user_id derived from JWT token)
 curl -X POST http://localhost:8080/api/registrations \
@@ -585,6 +624,8 @@ docker compose -f docker-compose.yml -f docker-compose.test.yml up --build test-
 - Input validation: username format, email format, password length, valid roles
 - Ownership scoping: users can only access their own data, organizers can only modify their own events
 - Service-to-service authentication via X-Service-Key
+- Optimistic concurrency: stale version on PUT/DELETE returns 409 with conflict details
+- Database migrations: Alembic migrations apply on startup, fallback to CREATE TABLE IF NOT EXISTS
 
 ---
 
@@ -595,7 +636,7 @@ docker compose -f docker-compose.yml -f docker-compose.test.yml up --build test-
 | Table | Service | Columns |
 |-------|---------|---------|
 | `users` | user-service | id, username, email, password_hash, full_name, **role**, created_at, is_active |
-| `events` | event-service | id, title, description, event_type, start_date, end_date, location, max_capacity, registered_count, organizer_id, ticket_price, status, created_at |
+| `events` | event-service | id, title, description, event_type, start_date, end_date, location, max_capacity, registered_count, organizer_id, ticket_price, status, **version**, created_at |
 | `registrations` | registration-service | id, user_id, event_id, registration_date, status, payment_method, payment_status, payment_reference, payment_gateway, payment_processed_at, ticket_number, notes |
 | `notifications` | notification-service | id, user_id, title, message, notification_type, is_read, created_at |
 

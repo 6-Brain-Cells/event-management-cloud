@@ -48,6 +48,7 @@ All services share a single PostgreSQL 16 instance but each owns its own tables.
 | ticket_price | DECIMAL(10,2) | DEFAULT 0.00 |
 | status | VARCHAR(20) | DEFAULT 'active' |
 | created_at | TIMESTAMP | DEFAULT NOW() |
+| version | INT | NOT NULL DEFAULT 1 — Optimistic concurrency counter; incremented on PUT/DELETE |
 
 ### `registrations` (registration-service)
 
@@ -95,6 +96,61 @@ All services share a single PostgreSQL 16 instance but each owns its own tables.
 | `idx_notifications_user_read` | notifications | `(user_id, is_read)` | User notification feed |
 
 All indexes are created via `CREATE INDEX IF NOT EXISTS` in each service's startup event, so they're auto-created on first run.
+
+---
+
+## Database Migrations (Alembic)
+
+All 4 services use **Alembic** for version-controlled database schema migrations. Each service has its own Alembic configuration to prevent migration conflicts in the shared PostgreSQL database.
+
+### Per-Service Configuration
+
+| Service | alembic.ini | Version Table | Initial Migration |
+|---------|-------------|---------------|-------------------|
+| user-service | `services/user-service/alembic.ini` | `alembic_version_user` | `001_users` |
+| event-service | `services/event-service/alembic.ini` | `alembic_version_event` | `001_events` (includes `version` column) |
+| registration-service | `services/registration-service/alembic.ini` | `alembic_version_registration` | `001_registrations` |
+| notification-service | `services/notification-service/alembic.ini` | `alembic_version_notification` | `001_notifications` |
+
+### Isolated Version Tables
+
+Each service uses a custom `version_table` in its `alembic/env.py` to avoid conflicting with other services' migration tracking:
+
+```python
+context.configure(
+    connection=connection,
+    target_metadata=target_metadata,
+    version_table="alembic_version_<service>",
+)
+```
+
+### Startup Behavior
+
+Each service's `startup()` function attempts `alembic upgrade head` first, falling back to `CREATE TABLE IF NOT EXISTS` if Alembic is unavailable.
+
+---
+
+## Optimistic Concurrency (Events Table)
+
+The `events` table includes a `version` column (`INT NOT NULL DEFAULT 1`) that enables optimistic concurrency control.
+
+### Mechanism
+
+1. Every event row starts with `version = 1`
+2. `PUT /events/{id}` requires `version` in the request body
+3. `DELETE /events/{id}` requires `?version=N` query parameter
+4. If the version matches, the update succeeds and `version` is incremented
+5. If the version does not match, HTTP 409 is returned with conflict details
+
+### Conflict Response (HTTP 409)
+
+```json
+{
+  "message": "Optimistic concurrency conflict: event was modified by another request",
+  "current_version": 3,
+  "provided_version": 1
+}
+```
 
 ---
 

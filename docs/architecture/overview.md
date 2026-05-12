@@ -28,6 +28,8 @@ Each service is a standalone FastAPI application running in its own Docker conta
 6. **Graceful degradation** — Redis/RabbitMQ failures are caught silently; core functionality continues
 7. **JWT-based RBAC** — All endpoints (except register/login/health) require Bearer token; roles (super_admin, organizer, attendee) enforced per endpoint
 8. **Input validation** — Pydantic field validators sanitize all user inputs at the API layer
+9. **Optimistic concurrency** — Events use a `version` column; PUT and DELETE require the current version, returning 409 on mismatch to prevent lost updates
+10. **Database migrations** — Each service runs Alembic migrations on startup with its own version table; falls back to `CREATE TABLE IF NOT EXISTS` if Alembic is unavailable
 
 ---
 
@@ -233,6 +235,7 @@ All services expose `GET /metrics` via `prometheus_fastapi_instrumentator`. Metr
 - **CORS:** Origin whitelist via `CORS_ORIGINS` environment variable (no more wildcard `*`)
 - **Input validation:** Pydantic field validators enforce username format, email format, password length (8-128), valid roles, capacity/price bounds
 - **Soft deletes:** Users are deactivated (`is_active=FALSE`), never hard-deleted
+- **Optimistic concurrency:** Event updates and deletes require a `version` field; concurrent modifications are rejected with HTTP 409
 - **Secrets:** Production credentials via environment variables, not hardcoded
 
 ---
@@ -298,5 +301,6 @@ Production uses separate volumes: `postgres_prod_data`, `redis_prod_data`, `rabb
 | **Containerization** | Docker | Multi-stage builds |
 | **Orchestration** | Docker Compose / Kubernetes | Multi-environment deployment |
 | **Authentication** | PyJWT | JWT token generation, validation, RBAC |
+| **Migrations** | Alembic + SQLAlchemy | Per-service schema versioning with isolated version tables |
 | **CI/CD** | GitHub Actions | Automated build + test |
 | **Language** | Python 3.11 | Runtime for all services |

@@ -21,7 +21,10 @@ Consumes events from RabbitMQ and creates user notifications. Also provides REST
 |------|-------------|
 | `main.py` | Application code: RabbitMQ consumer thread, notification CRUD, broadcast |
 | `Dockerfile` | Multi-stage build |
-| `requirements.txt` | fastapi, uvicorn, psycopg2-binary, pika, prometheus-fastapi-instrumentator |
+| `requirements.txt` | fastapi, uvicorn, psycopg2-binary, pika, alembic, sqlalchemy, prometheus-fastapi-instrumentator |
+| `alembic.ini` | Alembic configuration (version_table: `alembic_version_notification`) |
+| `alembic/env.py` | Migration environment with service-specific version table |
+| `alembic/versions/001_create_notifications_table.py` | Initial migration: creates notifications table and user/read index |
 | `.dockerignore` | Excludes build artifacts |
 
 **Note:** This service does NOT include `redis` in its requirements. It only consumes from RabbitMQ to prevent duplicate notifications.
@@ -225,6 +228,22 @@ The consumer runs in a daemon thread started during the FastAPI `startup` event.
 
 ---
 
+## Database Migrations
+
+The notification service uses **Alembic** for database schema migrations. On startup, the `startup()` function attempts to run `alembic upgrade head` first. If Alembic fails, it falls back to executing `CREATE TABLE IF NOT EXISTS` SQL directly.
+
+### Migration Chain
+
+| Version | File | Description |
+|---------|------|-------------|
+| `001_notifications` | `alembic/versions/001_create_notifications_table.py` | Creates `notifications` table and `idx_notifications_user_read` index |
+
+### Version Table
+
+Alembic tracks applied migrations in `alembic_version_notification` (not the default `alembic_version`) to avoid conflicts with other services sharing the same PostgreSQL database.
+
+---
+
 ## Dependencies
 
 ```
@@ -233,5 +252,7 @@ uvicorn[standard]
 psycopg2-binary
 pika
 PyJWT>=2.8.0
+alembic>=1.13.0
+sqlalchemy>=2.0.0
 prometheus-fastapi-instrumentator
 ```
