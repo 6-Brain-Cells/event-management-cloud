@@ -270,7 +270,9 @@ event-management-cloud/
 │   ├── grafana-dashboards/
 │   │   └── event-management-overview.json  # 15-panel Grafana dashboard
 │   ├── loki-config.yml                     # Log aggregation config
-│   └── promtail-config.yml                 # Log shipping from Docker containers
+│   ├── promtail-config.yml                 # Log shipping from Docker containers
+│   ├── alert_rules.yml                     # Prometheus alert rules (service health, error rates, queue depth)
+│   └── grafana-alerts.yml                  # Grafana unified alerting provisioning
 │
 ├── k8s/                                    # Kubernetes manifests
 │   ├── configmaps/
@@ -279,11 +281,24 @@ event-management-cloud/
 │   │   └── deployments.yaml                # 11 Deployments, 1 DaemonSet, 2 PVCs
 │   ├── services/
 │   │   └── services.yaml                   # 12 Services (ClusterIP + NodePort)
-│   └── monitoring/
-│       ├── prometheus-deployment.yaml      # Prometheus with RBAC (ServiceAccount, ClusterRole)
-│       ├── grafana-deployment.yaml         # Grafana with auto-provisioned datasources
-│       ├── loki-deployment.yaml            # Log aggregation
-│       └── promtail-daemonset.yaml         # Log shipper (runs on every node)
+│   ├── monitoring/
+│   │   ├── prometheus-deployment.yaml      # Prometheus with RBAC (ServiceAccount, ClusterRole)
+│   │   ├── grafana-deployment.yaml         # Grafana with auto-provisioned datasources
+│   │   ├── loki-deployment.yaml            # Log aggregation
+│   │   └── promtail-daemonset.yaml         # Log shipper (runs on every node)
+│   └── argocd/
+│       └── application.yaml                # ArgoCD GitOps Application manifest
+│
+├── helm/                                   # Helm chart for Kubernetes deployment
+│   └── event-management/
+│       ├── Chart.yaml                      # Chart metadata (v1.0.0)
+│       ├── values.yaml                     # Configurable values (replicas, resources, images)
+│       └── templates/
+│           ├── configmap.yaml              # ConfigMap from values
+│           ├── secret.yaml                 # Secret from values
+│           ├── infrastructure.yaml         # Postgres, Redis, RabbitMQ deployments + PVCs
+│           ├── services.yaml               # Microservice deployments + services
+│           └── nginx.yaml                  # Nginx deployment + NodePort service
 │
 ├── tests/
 │   └── test_api.py                         # Integration tests (pytest + requests)
@@ -546,6 +561,21 @@ On payment failure, the system automatically performs a compensating transaction
 - Database connections
 - Redis hit rate
 
+### Alerting
+
+Prometheus alert rules and Grafana unified alerting are pre-configured:
+
+| Alert | Condition | Severity |
+|-------|-----------|----------|
+| ServiceDown | `up == 0` for 1m | Critical |
+| HighErrorRate | 5xx rate > 10% for 5m | Warning |
+| HighResponseTime | p95 latency > 2s for 5m | Warning |
+| PostgresConnectionsHigh | Active connections > 80 for 5m | Warning |
+| RedisMemoryHigh | Memory usage > 90% for 5m | Warning |
+| RabbitMQQueueDepthHigh | notification_queue > 1000 messages for 10m | Warning |
+
+Alert rules: `monitoring/alert_rules.yml`, Grafana alerts: `monitoring/grafana-alerts.yml`
+
 ### Log Aggregation
 
 All services emit structured JSON logs with fields: `timestamp`, `level`, `service`, `message`, `correlation_id`. Promtail collects container logs from Docker and ships them to Loki. Query in Grafana Explore:
@@ -559,6 +589,43 @@ All services emit structured JSON logs with fields: `timestamp`, `level`, `servi
 ---
 
 ## Kubernetes Deployment
+
+### Helm Chart
+
+A production-ready Helm chart is available at `helm/event-management/`:
+
+```bash
+# Install via Helm
+helm install event-management ./helm/event-management
+
+# Upgrade
+helm upgrade event-management ./helm/event-management
+
+# Uninstall
+helm uninstall event-management
+```
+
+**Chart features:**
+- Parameterized replicas, resources, images via `values.yaml`
+- ConfigMap + Secret auto-generated from values
+- Infrastructure toggles (postgres, redis, rabbitmq can be disabled)
+- Persistent volume claims for stateful services
+
+### ArgoCD (GitOps)
+
+An ArgoCD Application manifest is provided at `k8s/argocd/application.yaml`:
+
+```bash
+# Apply ArgoCD application
+kubectl apply -f k8s/argocd/application.yaml
+```
+
+- Auto-sync enabled with self-heal
+- Prunes deleted resources automatically
+- Retries failed syncs (5 attempts, exponential backoff)
+- Monitors the `main` branch of the GitHub repository
+
+### Raw K8s Manifests (Alternative)
 
 ### Prerequisites
 
@@ -599,6 +666,7 @@ kubectl get pods -w
 | ServiceAccounts | 1 | Prometheus |
 | ClusterRoles | 1 | Prometheus kube-api access |
 | ClusterRoleBindings | 1 | Prometheus RBAC binding |
+| ArgoCD Applications | 1 | GitOps deployment from GitHub |
 
 ---
 
@@ -627,21 +695,18 @@ docker compose -f docker-compose.yml -f docker-compose.test.yml up --build test-
 
 ### Test Coverage
 
-- User registration, login, retrieval, deletion
-- Event CRUD, capacity management
-- Registration with payment processing (success/failure)
-- Notification delivery verification
-- Cross-service communication via RabbitMQ
-- JWT authentication: login returns valid token, expired/invalid tokens rejected
-- RBAC: attendee cannot create events, organizer can CRUD own events, super_admin has full access
-- Input validation: username format, email format, password length, valid roles
-- Ownership scoping: users can only access their own data, organizers can only modify their own events
-- Service-to-service authentication via X-Service-Key
-- Optimistic concurrency: stale version on PUT/DELETE returns 409 with conflict details
-- Database migrations: Alembic migrations apply on startup, fallback to CREATE TABLE IF NOT EXISTS
-- Circuit breaker: registration-service health shows breaker state (closed/open/half_open), failure count
-- Dead Letter Queue: notification-service DLQ stats endpoint shows message counts
-- Correlation IDs: X-Correlation-ID header propagated through nginx, returned in response headers
+38 integration tests covering:
+
+- **Health checks**: All services + gateway + circuit breaker state
+- **User authentication**: Register, login, duplicate prevention, wrong password, invalid tokens
+- **RBAC**: Role-based access (attendee cannot create events, organizer can, admin role management)
+- **Input validation**: Password length, email format, role validation, payment method
+- **Event CRUD**: Create, list (paginated), get, nonexistent returns 404
+- **Optimistic concurrency**: Correct version updates succeed, stale version returns 409
+- **Registration**: Register, duplicate returns 409, paginated listing, nonexistent event
+- **Correlation IDs**: Custom correlation ID returned, auto-generated when missing
+- **Notifications**: Create, get user notifications, DLQ stats endpoint
+- **Ownership scoping**: Users cannot access other users' registrations/notifications
 
 ---
 

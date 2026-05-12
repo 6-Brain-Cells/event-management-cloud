@@ -1,0 +1,14 @@
+apiVersion: v2
+name: event-management
+description: A Helm chart for the Event Management Cloud Platform
+type: application
+version: 1.0.0
+appVersion: "3.0.0"
+maintainers:
+  - name: event-mgmt-team
+keywords:
+  - microservices
+  - event-management
+  - fastapi
+  - kubernetes
+home: https://github.com/6-Brain-Cells/event-management-cloud

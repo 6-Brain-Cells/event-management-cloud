@@ -1,0 +1,115 @@
+apiVersion: 1
+
+groups:
+  - orgId: 1
+    name: service_health_alerts
+    folder: Event Management
+    interval: 30s
+    rules:
+      - uid: svc_down_alert
+        title: Service Down
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: prometheus
+            model:
+              expr: up{job=~".*-service"} == 0
+              instant: true
+              refId: A
+          - refId: B
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: prometheus
+            model:
+              conditions:
+                - evaluator:
+                    params: []
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params:
+                      - A
+                      - Instant
+                  reducer:
+                    params: []
+                    type: last
+                  type: query
+              datasource:
+                type: prometheus
+                uid: prometheus
+              expression: A
+              reducer: last
+              type: reduce
+              refId: B
+          - refId: C
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: __expr__
+            model:
+              conditions:
+                - evaluator:
+                    params:
+                      - 0
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params:
+                      - B
+                      - Instant
+                  type: query
+              expression: B
+              type: math
+              refId: C
+        noDataState: Alerting
+        execErrState: Alerting
+        for: 1m
+        labels:
+          severity: critical
+
+      - uid: high_error_rate_alert
+        title: High 5xx Error Rate
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: prometheus
+            model:
+              expr: >
+                sum(rate(http_requests_total{status=~"5..",job=~".*-service"}[5m])) by (job)
+                /
+                sum(rate(http_requests_total{job=~".*-service"}[5m])) by (job)
+              instant: true
+              refId: A
+          - refId: B
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: prometheus
+            model:
+              expression: A
+              reducer: last
+              type: reduce
+              refId: B
+          - refId: C
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: __expr__
+            model:
+              expression: B > 0.1
+              type: math
+              refId: C
+        noDataState: OK
+        execErrState: OK
+        for: 5m
+        labels:
+          severity: warning

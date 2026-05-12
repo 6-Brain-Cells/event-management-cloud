@@ -19,10 +19,10 @@ datasources:
     url: http://loki:3100
     isDefault: false
     editable: true
+    uid: loki
     jsonData:
       maxLines: 1000
       derivedFields:
-        # Link log lines that contain a request_id to a Tempo trace (optional future)
-        - name: "request_id"
-          matcherRegex: "request_id=([\\w-]+)"
+        - name: "correlation_id"
+          matcherRegex: '"correlation_id":\\s*"([\\w-]+)"'
           url: ""

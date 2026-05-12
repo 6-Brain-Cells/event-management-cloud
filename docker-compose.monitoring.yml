@@ -18,6 +18,7 @@ services:
     image: prom/prometheus:v2.48.0
     volumes:
       - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/alert_rules.yml:/etc/prometheus/alert_rules.yml:ro
       - prometheus_data:/prometheus
     command:
       - '--config.file=/etc/prometheus/prometheus.yml'
@@ -117,6 +118,7 @@ services:
       - ./monitoring/grafana-datasources.yml:/etc/grafana/provisioning/datasources/datasources.yml:ro
       - ./monitoring/grafana-dashboard-providers.yml:/etc/grafana/provisioning/dashboards/dashboard-providers.yml:ro
       - ./monitoring/grafana-dashboards:/etc/grafana/provisioning/dashboards
+      - ./monitoring/grafana-alerts.yml:/etc/grafana/provisioning/alerting/alerts.yml:ro
     ports:
       - "3000:3000"
     networks:
