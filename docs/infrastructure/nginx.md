@@ -2,7 +2,39 @@
 
 ## Overview
 
-Nginx serves as the API gateway for the system. It handles:
+Nginx serves as the API gateway for the system.
+
+```mermaid
+flowchart TB
+    subgraph External["🌐 External Clients"]
+        C["Browser / Mobile / API Consumer"]
+    end
+
+    subgraph Nginx["🚪 Nginx Gateway"]
+        RL["Rate Limiting\n5 req/s (auth) / 30 req/s (API)"]
+        PROXY["Reverse Proxy\n→ Upstream Services"]
+        STATIC["Static Files\nHTML/CSS/JS"]
+        HEADERS["Header Forwarding\nAuth, X-Service-Key, X-Correlation-ID"]
+        CACHE["Static Asset Cache\n7-day expires"]
+    end
+
+    subgraph Upstream["⚙️ Upstream Services"]
+        US["👤 User Service :8001"]
+        ES["📅 Event Service :8002"]
+        RS["🎫 Registration Service :8003"]
+        NS["🔔 Notification Service :8004"]
+    end
+
+    C --> Nginx
+    Nginx --> PROXY --> US & ES & RS & NS
+    Nginx --> STATIC
+
+    style Nginx fill:#16213e,stroke:#e94560,color:#e94560
+    style External fill:#1a1a2e,stroke:#00d9ff,color:#00d9ff
+    style Upstream fill:#0f3460,stroke:#00d9ff,color:#00d9ff
+```
+
+Nginx handles:
 1. **Reverse proxy** — Routes external requests to internal microservices
 2. **Rate limiting** — Protects auth and API endpoints
 3. **Static file serving** — Hosts the frontend HTML/CSS/JS
@@ -20,6 +52,32 @@ Nginx serves as the API gateway for the system. It handles:
 ---
 
 ## Route Mapping
+
+```mermaid
+flowchart TB
+    subgraph Routes["🛣️ Nginx Routes"]
+        H["/health\n(inline 200)"]
+        HU["/api/users/health → user-service:8000/health"]
+        HE["/api/events/health → event-service:8000/health"]
+        HR["/api/registrations/health → registration-service:8000/health"]
+        HN["/api/notifications/health → notification-service:8000/health"]
+        AU["/api/users/* → user-service:8000/users/*"]
+        AE["/api/events/* → event-service:8000/events/*"]
+        AR["/api/registrations/* → registration-service:8000/registrations/*"]
+        AN["/api/notifications/* → notification-service:8000/notifications/*"]
+        ROOT["/ → static files (index.html)"]
+    end
+
+    subgraph Rate["⚡ Rate Limits"]
+        RL5["auth_limit: 5 req/s\n(/register, /login)"]
+        RL30["api_limit: 30 req/s\n(all other /api/*)"]
+    end
+
+    Routes --> Rate
+
+    style Routes fill:#1a1a2e,stroke:#00d9ff,color:#00d9ff
+    style Rate fill:#16213e,stroke:#e94560,color:#e94560
+```
 
 | Gateway Path | Upstream Path | Service | Rate Limit |
 |-------------|---------------|---------|-----------|
@@ -40,7 +98,26 @@ Nginx serves as the API gateway for the system. It handles:
 
 ---
 
-## Rate Limiting
+## Rate Limiting Configuration
+
+```mermaid
+flowchart TB
+    subgraph Config["⚡ Rate Limiting Zones"]
+        Z1["limit_req_zone $binary_remote_addr\nzone=api_limit:10m rate=30r/s"]
+        Z2["limit_req_zone $binary_remote_addr\nzone=auth_limit:10m rate=5r/s"]
+    end
+
+    subgraph Application["📋 Applied To"]
+        A1["auth_limit: 5 req/s\nBurst: 10 (nodelay)\n→ /api/users/login\n→ /api/users/register"]
+        A2["api_limit: 30 req/s\nBurst: 50 (nodelay)\n→ All other /api/*"]
+    end
+
+    Z1 --> A2
+    Z2 --> A1
+
+    style Config fill:#1a1a2e,stroke:#00d9ff,color:#00d9ff
+    style Application fill:#16213e,stroke:#e94560,color:#e94560
+```
 
 ```nginx
 limit_req_zone $binary_remote_addr zone=api_limit:10m rate=30r/s;
@@ -58,6 +135,27 @@ limit_req_zone $binary_remote_addr zone=auth_limit:10m rate=5r/s;
 ---
 
 ## Upstream Configuration
+
+```mermaid
+flowchart TB
+    subgraph Upstreams["🔗 Upstream Definitions"]
+        U1["upstream user_service\nserver user-service:8000"]
+        U2["upstream event_service\nserver event-service:8000"]
+        U3["upstream registration_service\nserver registration-service:8000"]
+        U4["upstream notification_service\nserver notification-service:8000"]
+    end
+
+    subgraph Timeouts["⏱️ Proxy Timeouts"]
+        T1["connect_timeout: 5s"]
+        T2["read_timeout: 30s"]
+        T3["send_timeout: 30s"]
+    end
+
+    Upstreams --> Timeouts
+
+    style Upstreams fill:#1a1a2e,stroke:#00d9ff,color:#00d9ff
+    style Timeouts fill:#16213e,stroke:#e94560,color:#e94560
+```
 
 ```nginx
 upstream user_service {
@@ -80,13 +178,28 @@ Services are referenced by Docker Compose service name. All listen on port 8000 
 
 ## Proxy Settings
 
-```nginx
-proxy_connect_timeout 5s;
-proxy_read_timeout 30s;
-proxy_send_timeout 30s;
-proxy_buffering on;
-proxy_buffer_size 4k;
-proxy_buffers 8 4k;
+```mermaid
+flowchart TB
+    subgraph Headers["📋 Request Headers Forwarded"]
+        H1["Host $host"]
+        H2["X-Real-IP $remote_addr"]
+        H3["X-Forwarded-For $proxy_add_x_forwarded_for"]
+        H4["X-Forwarded-Proto $scheme"]
+        H5["Authorization $http_authorization\n(for API routes)"]
+        H6["X-Service-Key $http_x_service_key\n(for service-to-service routes)"]
+        H7["X-Correlation-ID $http_x_correlation_id\n(or auto-generated UUID)"]
+    end
+
+    subgraph Buffers["⚡ Buffer Settings"]
+        B1["proxy_buffering: on"]
+        B2["proxy_buffer_size: 4k"]
+        B3["proxy_buffers: 8 4k"]
+    end
+
+    Headers & Buffers
+
+    style Headers fill:#1a1a2e,stroke:#00d9ff,color:#00d9ff
+    style Buffers fill:#16213e,stroke:#e94560,color:#e94560
 ```
 
 | Setting | Value | Purpose |
@@ -102,26 +215,28 @@ proxy_buffers 8 4k;
 | `send_timeout` | 10s | Sending response to client |
 | `keepalive_timeout` | 65s | Keep-alive connection timeout |
 
-All proxied requests include:
+---
 
-```nginx
-proxy_set_header Host $host;
-proxy_set_header X-Real-IP $remote_addr;
-proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-proxy_set_header X-Forwarded-Proto $scheme;
-```
+## Correlation ID Flow
 
-API routes (non-health, non-auth) also forward auth headers:
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant NG as Nginx
+    participant S as Service
 
-```nginx
-proxy_set_header Authorization $http_authorization;
-proxy_set_header X-Service-Key $http_x_service_key;
-```
+    Note over C,Ng: No correlation ID provided
+    C->>+NG: POST /api/users/register (no X-Correlation-ID)
+    NG->>NG: Generate UUID: abc-123-xyz
+    NG->>+S: POST /users/register (X-Correlation-ID: abc-123-xyz)
+    S-->-NG: 201 response
+    NG-->-C: 201 (X-Correlation-ID: abc-123-xyz in response)
 
-All proxied requests also forward the correlation ID header for distributed tracing:
-
-```nginx
-proxy_set_header X-Correlation-ID $http_x_correlation_id;
+    Note over C,Ng: Correlation ID provided
+    C->>+NG: POST /api/events (X-Correlation-ID: existing-id)
+    NG->>+S: POST /events (X-Correlation-ID: existing-id)
+    S-->-NG: 200 response
+    NG-->-C: 200 (X-Correlation-ID: existing-id)
 ```
 
 If no `X-Correlation-ID` header is present on the incoming request, a UUID is generated and attached by the gateway before proxying to upstream services.
@@ -141,6 +256,26 @@ location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg|woff2?)$ {
 
 ## Health Check Endpoints
 
+```mermaid
+flowchart TB
+    subgraph Gateway["🚪 Gateway"]
+        H1["GET /health → inline 200 {\"status\":\"gateway-healthy\"}"]
+    end
+
+    subgraph Proxied["🔗 Proxied to Services"]
+        H2["GET /api/users/health → user-service:8000/health"]
+        H3["GET /api/events/health → event-service:8000/health"]
+        H4["GET /api/registrations/health → registration-service:8000/health"]
+        H5["GET /api/notifications/health → notification-service:8000/health"]
+    end
+
+    H1
+    H2 & H3 & H4 & H5
+
+    style Gateway fill:#1a1a2e,stroke:#00d9ff,color:#00d9ff
+    style Proxied fill:#16213e,stroke:#e94560,color:#e94560
+```
+
 ### Gateway Health (inline)
 
 ```nginx
@@ -151,8 +286,6 @@ location /health {
 ```
 
 ### Per-Service Health (proxied)
-
-Four dedicated locations proxy health checks to each service:
 
 ```nginx
 location /api/users/health {

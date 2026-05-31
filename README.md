@@ -1,99 +1,208 @@
-# Event Management System — Cloud & DevOps Project
+# Event Management System — Cloud & DevOps Platform
 
-A microservices-based event management platform demonstrating containerization, orchestration, async messaging, monitoring, and multi-environment deployment.
+> A production-grade microservices platform for managing conferences, workshops, and seminars. Built with Docker, FastAPI, PostgreSQL, RabbitMQ, Redis, and Kubernetes.
 
 ---
 
 ## Table of Contents
 
-- [Architecture Overview](#architecture-overview)
+- [System Overview](#system-overview)
+- [Architecture](#architecture)
 - [Microservices](#microservices)
+- [Communication Patterns](#communication-patterns)
 - [Technology Stack](#technology-stack)
-- [Project Structure](#project-structure)
-- [Folder Descriptions](#folder-descriptions)
 - [Getting Started](#getting-started)
+- [Project Structure](#project-structure)
 - [Environments](#environments)
 - [API Reference](#api-reference)
 - [Monitoring & Observability](#monitoring--observability)
-- [Kubernetes Deployment](#kubernetes-deployment)
-- [CI/CD](#cicd)
+- [Deployment](#deployment)
 - [Testing](#testing)
 
 ---
 
-## Architecture Overview
+## System Overview
 
+```mermaid
+%%{init: {'theme': 'base', 'themeVariables': { 'fontFamily': 'monospace'}}}%%
+flowchart LR
+    subgraph External["🌐 External Clients"]
+        A["Browser / Mobile App"]
+    end
+
+    subgraph Gateway["🚪 Nginx API Gateway"]
+        G[":8080 Reverse Proxy\nRate Limiting\nTLS Termination\nStatic Files"]
+    end
+
+    subgraph Services["⚙️ Microservices"]
+        US["👤 User Service\n:8001\n• Registration\n• JWT Auth\n• RBAC"]
+        ES["📅 Event Service\n:8002\n• CRUD Events\n• Capacity Mgmt\n• Optimistic Locking"]
+        RS["🎫 Registration Service\n:8003\n• Bookings\n• Payments\n• Compensating Txn"]
+        NS["🔔 Notification Service\n:8004\n• RabbitMQ Consumer\n• DLQ Handling"]
+    end
+
+    subgraph Infra["🗄️ Infrastructure"]
+        PG[("🐘 PostgreSQL\n:5432\n• Users, Events\n• Registrations\n• Notifications")]
+        RD[("📡 Redis\n:6379\n• Token Cache\n• Event Cache\n• Pub/Sub")]
+        MQ[("🐰 RabbitMQ\n:5672 / :15672\n• Topic Exchange\n• DLQ")]
+    end
+
+    A --> G
+    G --> US & ES & RS & NS
+    US & ES --> PG
+    RS --> ES
+    NS --> MQ
+    US --> RD
+    ES --> RD
+    RS -.-> RD
+    RS -.-> MQ
+
+    style Gateway fill:#1a1a2e,stroke:#00d9ff,color:#00d9ff
+    style Services fill:#16213e,stroke:#e94560,color:#e94560
+    style Infra fill:#0f3460,stroke:#00d9ff,color:#00d9ff
+    style External fill:#1a1a2e,stroke:#00d9ff,color:#00d9ff
 ```
-                          ┌─────────────────────────────────────────┐
-                          │           Nginx (API Gateway)            │
-                          │   Rate Limiting / Reverse Proxy / TLS   │
-                          │              Port 80/8080                │
-                          └──────┬──────┬──────┬──────┬─────────────┘
-                                 │      │      │      │
-                  ┌──────────────┘      │      │      └──────────────┐
-                  ▼                     ▼      ▼                     ▼
-          ┌───────────────┐   ┌───────────────┐  ┌────────────────┐  ┌──────────────────┐
-          │  User Service  │   │ Event Service  │  │ Registration   │  │ Notification     │
-          │   :8001        │   │   :8002        │  │ Service :8003  │  │ Service :8004    │
-          │   FastAPI       │   │   FastAPI      │  │   FastAPI      │  │   FastAPI        │
-          └───────┬────────┘   └───────┬────────┘  └───────┬────────┘  └───────┬──────────┘
-                  │                    │                    │                   │
-                  │        ┌───────────┴────────────────────┘                   │
-                  │        │  Sync HTTP (httpx) for capacity checks             │
-                  │        │                                                    │
-                  ▼        ▼                                                    ▼
-          ┌──────────────────────────────────────────────────────────────────────────┐
-          │                         Async Messaging (RabbitMQ)                       │
-          │  Exchange: "events" (topic)                                              │
-          │  Routing keys: user.registered, event.created,                           │
-          │                 registration.confirmed, registration.cancelled            │
-          │  Consumer: notification-service ← notification_queue                      │
-          └──────────────────────────────────────────────────────────────────────────┘
-                                           │
-                  ┌────────────────────────┼────────────────────────────┐
-                  ▼                        ▼                            ▼
-          ┌──────────────┐        ┌──────────────┐             ┌──────────────┐
-          │  PostgreSQL   │        │    Redis      │             │   RabbitMQ   │
-           │  (Primary DB) │        │  (Cache/      │             │  (Message    │
-           │  Port 5432    │        │   Pub-Sub)    │             │   Broker)    │
-           │               │        │  Port 6379    │             │  5672/15672  │
-          └──────────────┘        └──────────────┘             └──────────────┘
+
+**Key Features:**
+- 🔐 **JWT-based RBAC** — 3 roles (super_admin, organizer, attendee)
+- 🔄 **Circuit Breaker** — Protects registration → event-service calls
+- 📊 **Optimistic Concurrency** — Version-based conflict detection on events
+- 💾 **Redis Caching** — 30s TTL on event listings with automatic invalidation
+- 📬 **Async Messaging** — RabbitMQ topic exchange with DLQ support
+- 🏗️ **Multi-environment** — dev (8080), test (8081), prod (8082) simultaneously
+
+---
+
+## Architecture
+
+### High-Level System Topology
+
+```mermaid
+flowchart TB
+    subgraph Internet["🌐 Internet"]
+        CLIENT["Client Browser / API Consumer"]
+    end
+
+    subgraph Gateway["Nginx API Gateway (:80/:8080)"]
+        NGINX["Reverse Proxy\nRate Limiting\nAuth Headers\nCorrelation ID"]
+    end
+
+    subgraph AppServices["Application Microservices"]
+        USER["👤 User Service\nFastAPI :8001\nPostgreSQL / Redis\nJWT Auth + RBAC"]
+        EVENT["📅 Event Service\nFastAPI :8002\nPostgreSQL / Redis\nCapacity + Versioning"]
+        REG["🎫 Registration Service\nFastAPI :8003\nPostgreSQL\nhttpx → Event Service\nCircuit Breaker"]
+        NOTIF["🔔 Notification Service\nFastAPI :8004\nPostgreSQL\nRabbitMQ Consumer\nDLQ Handler"]
+    end
+
+    subgraph DataLayer["Data & Messaging Layer"]
+        PG["🐘 PostgreSQL\nShared DB, Own Tables\nConnection Pool\nAlembic Migrations"]
+        RD["📡 Redis\nToken Cache\nEvent Cache\nPub/Sub Channel"]
+        MQ["🐰 RabbitMQ\nTopic Exchange\nnotification_queue\nnotification_dlx"]
+    end
+
+    CLIENT --> NGINX --> USER & EVENT & REG & NOTIF
+
+    USER --> PG
+    EVENT --> PG
+    REG --> PG
+    NOTIF --> PG
+
+    REG -.http.->|"/events/id/increment"| EVENT
+    REG -.http.->|"/events/id/decrement"| EVENT
+
+    USER -.publish.-> MQ
+    EVENT -.publish.-> MQ
+    REG -.publish.-> MQ
+
+    NOTIF -.consume.-> MQ
+
+    USER -.publish.-> RD
+    EVENT -.publish.-> RD
+    REG -.publish.-> RD
+
+    style Gateway fill:#1a1a2e,stroke:#00d9ff,color:#00d9ff
+    style AppServices fill:#16213e,stroke:#e94560,color:#e94560
+    style DataLayer fill:#0f3460,stroke:#00d9ff,color:#00d9ff
 ```
 
 ### Communication Patterns
 
-| Pattern | Technology | Example |
-|---------|-----------|---------|
-| **Sync request/response** | HTTP (httpx) | Registration service calls event-service to check/increment capacity |
-| **Async fire-and-forget** | RabbitMQ (topic exchange) | User service publishes `user.registered` → notification-service consumes |
-| **Cache/Pub-Sub** | Redis | Services publish to Redis channels as secondary notification path |
-| **API Gateway** | Nginx | All external traffic routes through nginx with rate limiting |
-| **Service-to-service** | X-Service-Key header | Registration service authenticates to event-service for capacity operations |
-| **Circuit breaker** | Custom (registration → event-service) | Opens after 5 failures, 30s recovery, half-open with 3 probe successes |
-| **Dead Letter Queue** | RabbitMQ DLX | Failed notification messages retry 3x then route to `notification_dlx` queue |
-| **Correlation IDs** | X-Correlation-ID header | Propagated through nginx to all services; returned in response headers |
+```mermaid
+flowchart LR
+    subgraph Sync["🔄 Synchronous (HTTP/httpx)"]
+        S1["Registration Service"]
+        S2["Event Service"]
+        S1 -->|"GET /events/{id}"| S2
+        S1 -->|"PATCH /increment-registration"| S2
+        S1 -->|"PATCH /decrement-registration"| S2
+    end
 
-### Design Decisions
+    subgraph Async["📡 Asynchronous (RabbitMQ Topic)"]
+        P1["User Service"]
+        P2["Event Service"]
+        P3["Registration Service"]
+        P4["Notification Service"]
 
-| Decision | Choice | Rationale |
-|----------|--------|-----------|
-| Language | Python 3.11 + FastAPI | Async support, auto-docs, lightweight |
-| Password hashing | bcrypt (12 rounds) | Industry standard, adaptive cost |
-| DB connections | ThreadedConnectionPool (2-10) | Reuse connections, avoid per-request overhead |
-| Payment processing | Mock gateway with 5% random decline | Simulates real payment failures for testing |
-| Capacity management | Increment-then-pay with compensating decrement | Prevents race conditions in concurrent registrations |
-| Notification delivery | RabbitMQ consumer only (no Redis subscriber) | Prevents duplicate notifications from dual sources |
-| Authentication | JWT (PyJWT, HS256, 24h expiry) | Stateless auth with role claims, Redis session store |
-| Authorization | RBAC with 3 roles (super_admin, organizer, attendee) | Role-based access control enforced per endpoint |
-| Input validation | Pydantic field validators | Username, email, password, role validation at API layer |
-| Optimistic concurrency | `version` column on events table | PUT/DELETE require version; 409 on mismatch prevents lost updates |
-| Database migrations | Alembic per service | Version-controlled schema changes; fallback to CREATE TABLE IF NOT EXISTS on startup |
-| Redis caching | Event listing cache with 30s TTL | Reduces DB load for high-traffic list endpoints |
-| CORS | Origin whitelist via CORS_ORIGINS env var | Restrict cross-origin access to known frontend hosts |
-| Service-to-service auth | X-Service-Key header | Internal services authenticate to each other via shared key |
-| Circuit breaker | Custom implementation in registration-service | Protects event-service calls: opens after 5 failures, 30s recovery, half-open with 3 successes |
-| Dead Letter Queue | RabbitMQ DLX + notification_dlx queue | Failed messages retry up to 3 times, then routed to DLQ for inspection |
-| Structured logging | JSON formatter with correlation IDs | All services log structured JSON with timestamp, service, level, correlation_id; X-Correlation-ID header propagated through nginx |
+        P1 -->|"user.registered"| P4
+        P2 -->|"event.created"| P4
+        P3 -->|"registration.confirmed"| P4
+        P3 -->|"registration.cancelled"| P4
+    end
+
+    style Sync fill:#1a1a2e,stroke:#00d9ff,color:#00d9ff
+    style Async fill:#16213e,stroke:#e94560,color:#e94560
+```
+
+### Registration Flow with Compensating Transaction
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant REG as Registration Service
+    participant EVT as Event Service
+    participant MQ as RabbitMQ
+    participant NOTIF as Notification Service
+
+    C->>+REG: POST /api/registrations {event_id, payment_method}
+    REG->>+EVT: GET /events/{id}
+    EVT-->-REG: event data
+    REG->>+EVT: PATCH /events/{id}/increment-registration
+    alt Event full
+        EVT-->-REG: 409 Conflict
+        REG-->-C: 409 Event is full
+    end
+    EVT-->-REG: {registered_count, max_capacity}
+
+    REG->>REG: process_payment_mock()
+    alt Payment Success
+        REG->>+PG: INSERT registration
+        PG-->-REG: registration created
+        REG->>REG: Generate ticket (TKT-XXXX-XXXX)
+        REG->>MQ: Publish registration.confirmed
+        REG-->-C: 200 OK {ticket_number}
+    else Payment Failed
+        REG->>+EVT: PATCH /events/{id}/decrement-registration
+        EVT-->-REG: compensated
+        REG-->-C: 402 Payment Failed
+    end
+
+    MQ->>+NOTIF: registration.confirmed
+    NOTIF->>PG: INSERT notification (confirmed)
+    NOTIF-->-MQ: ack
+```
+
+### Circuit Breaker State Machine
+
+```mermaid
+stateDiagram-v2
+    [*] --> Closed
+    Closed --> Open: 5 consecutive failures (CB_FAILURE_THRESHOLD)
+    Open --> HalfOpen: 30s recovery timeout (CB_RECOVERY_TIMEOUT)
+    HalfOpen --> Closed: 3 successful probes (CB_HALF_OPEN_MAX)
+    HalfOpen --> Open: any probe failure
+    Closed --> Closed: failures < threshold
+    Open --> Open: waiting for timeout
+```
 
 ---
 
@@ -119,10 +228,10 @@ A microservices-based event management platform demonstrating containerization, 
 | Endpoint | Method | Auth | Description |
 |----------|--------|------|-------------|
 | `/events` | POST | organizer, super_admin | Create event |
-| `/events` | GET | Any user or service | List events (filter by type, status; paginated with page/page_size) |
+| `/events` | GET | Any user or service | List events (filter by type, status; paginated) |
 | `/events/{id}` | GET | Any user or service | Get event by ID |
-| `/events/{id}` | PUT | organizer (own), super_admin | Update event fields (requires `version` in body; returns 409 on conflict) |
-| `/events/{id}` | DELETE | organizer (own), super_admin | Cancel event (requires `?version=N` query param; returns 409 on conflict) |
+| `/events/{id}` | PUT | organizer (own), super_admin | Update event (requires `version`; returns 409 on conflict) |
+| `/events/{id}` | DELETE | organizer (own), super_admin | Cancel event (requires `?version=N`) |
 | `/events/{id}/increment-registration` | PATCH | Service key or super_admin | Atomically increment registered_count |
 | `/events/{id}/decrement-registration` | PATCH | Service key or super_admin | Atomically decrement registered_count |
 | `/health` | GET | Public | Service health check |
@@ -133,15 +242,15 @@ A microservices-based event management platform demonstrating containerization, 
 
 | Endpoint | Method | Auth | Description |
 |----------|--------|------|-------------|
-| `/registrations` | POST | attendee, organizer, super_admin | Register for event (user_id from JWT) |
-| `/registrations` | GET | Any user (own only; super_admin sees all) | List registrations (paginated with page/page_size) |
+| `/registrations` | POST | attendee, organizer, super_admin | Register for event |
+| `/registrations` | GET | Any user (own only; super_admin sees all) | List registrations |
 | `/registrations/{id}` | GET | Own user or super_admin | Get registration by ID |
 | `/registrations/user/{user_id}` | GET | Own user or super_admin | List registrations by user |
 | `/registrations/event/{event_id}` | GET | Any user | List confirmed registrations by event |
 | `/registrations/{id}/payment` | PATCH | super_admin | Update payment status |
-| `/registrations/{id}/process-payment` | POST | Own user or super_admin | Retry payment processing |
+| `/registrations/{id}/process-payment` | POST | Own user or super_admin | Retry payment |
 | `/registrations/{id}` | DELETE | Own user or super_admin | Cancel registration |
-| `/health` | GET | Public | Service health check + circuit breaker state |
+| `/health` | GET | Public | Health check + circuit breaker state |
 
 **Publishes:** `registration.confirmed`, `registration.cancelled` to RabbitMQ
 
@@ -153,16 +262,71 @@ A microservices-based event management platform demonstrating containerization, 
 |----------|--------|------|-------------|
 | `/notifications` | POST | super_admin | Create notification |
 | `/notifications/user/{user_id}` | GET | Own user or super_admin | List notifications by user |
-| `/notifications/{id}/read` | PATCH | Own user or super_admin | Mark notification as read |
-| `/notifications/broadcast` | POST | super_admin | Send notification to multiple users |
+| `/notifications/{id}/read` | PATCH | Own user or super_admin | Mark as read |
+| `/notifications/broadcast` | POST | super_admin | Send to multiple users |
 | `/notifications/dlq/stats` | GET | super_admin | Dead Letter Queue statistics |
 | `/health` | GET | Public | Service health check |
 
-**Consumes:** All routing keys from `events` exchange via `notification_queue` (RabbitMQ consumer thread with DLQ support)
+**Consumes:** All routing keys from `events` exchange via `notification_queue`
+
+---
+
+## Communication Patterns
+
+| Pattern | Technology | Example |
+|---------|-----------|---------|
+| **Sync request/response** | HTTP (httpx) | Registration → Event (capacity check) |
+| **Async fire-and-forget** | RabbitMQ (topic) | User registered → Notification service |
+| **Cache/Pub-Sub** | Redis | Events cache (30s TTL), session store |
+| **API Gateway** | Nginx | Rate limiting, header forwarding |
+| **Service-to-service auth** | X-Service-Key header | Internal HTTP calls |
+| **Circuit breaker** | Custom | Registration → Event (opens after 5 failures) |
+| **Dead Letter Queue** | RabbitMQ DLX | Failed notifications retry 3× then DLQ |
+| **Correlation IDs** | X-Correlation-ID header | End-to-end request tracing |
 
 ---
 
 ## Technology Stack
+
+```mermaid
+graph LR
+    subgraph Runtime["Runtime"]
+        PY["🐍 Python 3.11\nAsync I/O, FastAPI"]
+    end
+
+    subgraph Frameworks["Framework & Libraries"]
+        FA["⚡ FastAPI\nAuto-docs, Pydantic"]
+        AL["🔄 Alembic\nDB Migrations"]
+        SQ["🗃️ SQLAlchemy\nORM"]
+    end
+
+    subgraph Data["Data Layer"]
+        PG["🐘 PostgreSQL 16\nConnection Pool"]
+        RD["📡 Redis 7\nCache, Pub/Sub"]
+        MQ["🐰 RabbitMQ 3\nAsync Messaging"]
+    end
+
+    subgraph Infra["Infrastructure"]
+        NG["🚪 Nginx\nReverse Proxy"]
+        DC["🐳 Docker\nMulti-stage Builds"]
+        K8["☸️ Kubernetes\nOrchestration"]
+    end
+
+    subgraph Observability["Observability"]
+        PR["📊 Prometheus\nMetrics"]
+        GF["📈 Grafana\nDashboards"]
+        LK["📝 Loki + Promtail\nLog Aggregation"]
+    end
+
+    PY --> FA
+    FA --> AL & SQ
+    SQ --> PG
+    PG --> RD & MQ
+    NG --> FA
+    DC --> K8
+    PR --> GF
+    LK --> GF
+```
 
 | Category | Technology | Version | Purpose |
 |----------|-----------|---------|---------|
@@ -175,202 +339,9 @@ A microservices-based event management platform demonstrating containerization, 
 | **Metrics** | Prometheus | 2.48.0 | Metrics collection |
 | **Visualization** | Grafana | 10.2.0 | Dashboards |
 | **Logging** | Loki + Promtail | 2.9.3 | Centralized log aggregation |
-| **DB Driver** | psycopg2 | Latest | PostgreSQL connection pooling |
-| **HTTP Client** | httpx | Latest | Inter-service communication |
-| **Password** | bcrypt | Latest | Secure password hashing |
-| **Messaging** | pika | Latest | RabbitMQ client |
-| **Auth** | PyJWT | 2.8.0+ | JWT token generation and validation (HS256) |
-| **Migrations** | Alembic | 1.13.0+ | Database schema migrations per service |
-| **Migrations ORM** | SQLAlchemy | 2.0.0+ | Required by Alembic for migration engine |
-| **Metrics** | prometheus-fastapi-instrumentator | Latest | Auto-instrument HTTP metrics |
 | **Containerization** | Docker | — | Multi-stage builds |
 | **Orchestration** | Kubernetes (Minikube) | — | Production deployment |
 | **CI** | GitHub Actions | — | Automated testing |
-
----
-
-## Project Structure
-
-```
-event-management-cloud/
-├── .github/
-│   └── workflows/
-│       └── ci.yml                          # GitHub Actions CI pipeline
-├── docker-compose.yml                      # Base definitions (shared services)
-├── docker-compose.dev.yml                  # Development overrides (hot-reload, exposed ports)
-├── docker-compose.test.yml                 # Testing overrides (isolated testdb)
-├── docker-compose.prod.yml                 # Production overrides (replicas, resource limits)
-├── docker-compose.monitoring.yml           # Prometheus, Grafana, Loki, Promtail, exporters
-├── manage.sh                               # Management helper script
-├── README.md                               # This file
-│
-├── services/                               # Microservices (each = separate Docker container)
-│   ├── user-service/
-│   │   ├── main.py                         # FastAPI app, routes, models, DB schema
-│   │   ├── Dockerfile                      # Multi-stage build
-│   │   ├── requirements.txt                # Python dependencies
-│   │   ├── alembic.ini                     # Alembic config (version_table: alembic_version_user)
-│   │   ├── alembic/                        # Database migrations
-│   │   │   ├── env.py                      # Migration environment
-│   │   │   ├── script.py.mako             # Migration script template
-│   │   │   └── versions/
-│   │   │       └── 001_create_users_table.py
-│   │   └── .dockerignore
-│   ├── event-service/
-│   │   ├── main.py
-│   │   ├── Dockerfile
-│   │   ├── requirements.txt
-│   │   ├── alembic.ini                     # Alembic config (version_table: alembic_version_event)
-│   │   ├── alembic/
-│   │   │   ├── env.py
-│   │   │   ├── script.py.mako
-│   │   │   └── versions/
-│   │   │       └── 001_create_events_table.py  # Includes version column + migration
-│   │   └── .dockerignore
-│   ├── registration-service/
-│   │   ├── main.py
-│   │   ├── Dockerfile
-│   │   ├── requirements.txt
-│   │   ├── alembic.ini                     # Alembic config (version_table: alembic_version_registration)
-│   │   ├── alembic/
-│   │   │   ├── env.py
-│   │   │   ├── script.py.mako
-│   │   │   └── versions/
-│   │   │       └── 001_create_registrations_table.py
-│   │   └── .dockerignore
-│   └── notification-service/
-│       ├── main.py
-│       ├── Dockerfile
-│       ├── requirements.txt
-│       ├── alembic.ini                     # Alembic config (version_table: alembic_version_notification)
-│       ├── alembic/
-│       │   ├── env.py
-│       │   ├── script.py.mako
-│       │   └── versions/
-│       │       └── 001_create_notifications_table.py
-│       └── .dockerignore
-│
-├── nginx/                                  # API Gateway + Frontend
-│   ├── nginx.conf                          # Reverse proxy config, rate limiting
-│   ├── Dockerfile                          # Multi-stage build
-│   ├── .dockerignore
-│   ├── index.html                          # Frontend pages
-│   ├── users.html
-│   ├── events.html
-│   ├── registrations.html
-│   ├── notifications.html
-│   └── assets/
-│       ├── style.css                       # Shared styles
-│       └── api.js                          # API client helpers
-│
-├── monitoring/                             # Observability stack configuration
-│   ├── prometheus.yml                      # Scrape targets for all services + exporters
-│   ├── grafana-datasources.yml             # Auto-provisioned Prometheus + Loki datasources
-│   ├── grafana-dashboard-providers.yml     # Dashboard auto-provisioning config
-│   ├── grafana-dashboards/
-│   │   └── event-management-overview.json  # 15-panel Grafana dashboard
-│   ├── loki-config.yml                     # Log aggregation config
-│   ├── promtail-config.yml                 # Log shipping from Docker containers
-│   ├── alert_rules.yml                     # Prometheus alert rules (service health, error rates, queue depth)
-│   └── grafana-alerts.yml                  # Grafana unified alerting provisioning
-│
-├── k8s/                                    # Kubernetes manifests
-│   ├── configmaps/
-│   │   └── config.yaml                     # ConfigMap + Secret (DB, Redis, RabbitMQ credentials)
-│   ├── deployments/
-│   │   └── deployments.yaml                # 11 Deployments, 1 DaemonSet, 2 PVCs
-│   ├── services/
-│   │   └── services.yaml                   # 12 Services (ClusterIP + NodePort)
-│   ├── monitoring/
-│   │   ├── prometheus-deployment.yaml      # Prometheus with RBAC (ServiceAccount, ClusterRole)
-│   │   ├── grafana-deployment.yaml         # Grafana with auto-provisioned datasources
-│   │   ├── loki-deployment.yaml            # Log aggregation
-│   │   └── promtail-daemonset.yaml         # Log shipper (runs on every node)
-│   └── argocd/
-│       └── application.yaml                # ArgoCD GitOps Application manifest
-│
-├── helm/                                   # Helm chart for Kubernetes deployment
-│   └── event-management/
-│       ├── Chart.yaml                      # Chart metadata (v1.0.0)
-│       ├── values.yaml                     # Configurable values (replicas, resources, images)
-│       └── templates/
-│           ├── configmap.yaml              # ConfigMap from values
-│           ├── secret.yaml                 # Secret from values
-│           ├── infrastructure.yaml         # Postgres, Redis, RabbitMQ deployments + PVCs
-│           ├── services.yaml               # Microservice deployments + services
-│           └── nginx.yaml                  # Nginx deployment + NodePort service
-│
-├── tests/
-│   └── test_api.py                         # Integration tests (pytest + requests)
-│
-└── docs/                                   # Project documentation
-    ├── architecture/
-    │   └── overview.md                     # Architecture deep-dive
-    ├── services/
-    │   ├── user-service.md                 # User service specification
-    │   ├── event-service.md                # Event service specification
-    │   ├── registration-service.md         # Registration service specification
-    │   └── notification-service.md         # Notification service specification
-    ├── infrastructure/
-    │   ├── database.md                     # Database schema, indexes, connection pooling
-    │   ├── rabbitmq.md                     # Messaging topology, exchanges, queues
-    │   ├── redis.md                        # Redis usage, pub-sub channels
-    │   └── nginx.md                        # Gateway config, rate limiting, routes
-    ├── api/
-    │   └── endpoints.md                    # Full API reference with examples
-    └── deployment/
-        ├── docker.md                       # Docker & Compose deployment guide
-        ├── kubernetes.md                   # K8s deployment guide
-        └── monitoring.md                   # Monitoring stack setup
-```
-
----
-
-## Folder Descriptions
-
-### `services/`
-
-Contains four independent FastAPI microservices. Each service has its own Dockerfile, requirements.txt, and .dockerignore. Services are independently deployable and scale horizontally.
-
-- **Shared patterns across all services:** DB connection pooling (`ThreadedConnectionPool`), Redis singleton, RabbitMQ publisher, Prometheus instrumentation, CORS middleware (origin whitelist), JWT authentication, RBAC role checking, Pydantic input validation, health endpoint, Alembic database migrations (with fallback to `CREATE TABLE IF NOT EXISTS`), structured JSON logging with correlation IDs (`X-Correlation-ID` header propagated through nginx)
-- **Each service owns its own table** but shares the same PostgreSQL database
-- **Each service has its own Alembic migration chain** with separate version tables (`alembic_version_user`, `alembic_version_event`, `alembic_version_registration`, `alembic_version_notification`) to avoid conflicts in the shared database
-
-### `nginx/`
-
-API gateway and static frontend. Routes external requests to internal services, enforces rate limits, and serves HTML pages. Multi-stage Docker build copies static assets into the nginx image.
-
-- **Rate limits:** Auth endpoints (5 req/s), API endpoints (30 req/s)
-- **Timeouts:** Connect 5s, read 30s, send 30s
-- **Static caching:** JS/CSS/images cached 7 days
-- **Header forwarding:** Authorization, X-Service-Key, X-Correlation-ID
-
-### `monitoring/`
-
-Configuration files for the observability stack. Mounted read-only into their respective containers.
-
-- `prometheus.yml` — Scrapes 8 targets (4 services + 4 exporters)
-- `grafana-datasources.yml` — Auto-provisions Prometheus and Loki as data sources
-- `grafana-dashboard-providers.yml` — Tells Grafana where to find dashboard JSON files
-- `event-management-overview.json` — Pre-built dashboard with 15 panels
-- `loki-config.yml` + `promtail-config.yml` — Centralized log collection from Docker containers
-
-### `k8s/`
-
-Kubernetes manifests for production deployment. Designed for Minikube with locally built images (`imagePullPolicy: Never`).
-
-- **ConfigMaps + Secrets:** Centralized configuration, credentials via secretKeyRef
-- **Deployments:** 11 Deployments (4 services + postgres + redis + rabbitmq + nginx + monitoring stack), 1 DaemonSet (promtail), 2 PVCs (postgres 1Gi, redis 512Mi)
-- **Services:** ClusterIP for internal communication, NodePort for external access
-- **RBAC:** Prometheus has ServiceAccount + ClusterRole + ClusterRoleBinding for Kubernetes service discovery
-
-### `tests/`
-
-Integration tests using pytest. Runs against the full stack via the test Docker Compose overlay.
-
-### `.github/`
-
-GitHub Actions CI pipeline. Runs on push/PR, executes tests via `manage.sh test`.
 
 ---
 
@@ -385,7 +356,7 @@ GitHub Actions CI pipeline. Runs on push/PR, executes tests via `manage.sh test`
 ### Quick Start (Development)
 
 ```bash
-# Clone the repository
+# Clone and start
 git clone <repo-url>
 cd event-management-cloud
 
@@ -395,7 +366,7 @@ docker compose -f docker-compose.yml \
                -f docker-compose.monitoring.yml \
                up --build
 
-# Wait for all health checks to pass (~30 seconds)
+# Wait ~30 seconds for all health checks to pass
 ```
 
 ### Access Points
@@ -409,99 +380,131 @@ docker compose -f docker-compose.yml \
 | Notification Service | http://localhost:8004 | — |
 | Prometheus | http://localhost:9090 | — |
 | Grafana | http://localhost:3000 | admin / admin |
-| RabbitMQ Management | http://localhost:45672 | guest / guest |
+| RabbitMQ Management | http://localhost:15672 | guest / guest |
 | PostgreSQL | localhost:15432 | postgres / postgres |
 | Redis | localhost:16379 | — |
 
 ### Quick API Test
 
 ```bash
-# Register an organizer
+# 1. Register an organizer
 curl -X POST http://localhost:8080/api/users/register \
   -H "Content-Type: application/json" \
   -d '{"username":"alice","email":"alice@test.com","password":"Password123","full_name":"Alice","role":"organizer"}'
 
-# Login (returns JWT token)
-curl -X POST http://localhost:8080/api/users/login \
+# 2. Login → get JWT token
+TOKEN=$(curl -s -X POST http://localhost:8080/api/users/login \
   -H "Content-Type: application/json" \
-  -d '{"email":"alice@test.com","password":"Password123"}'
+  -d '{"email":"alice@test.com","password":"Password123"}' | jq -r '.token')
 
-# Save the token from login response, then:
-TOKEN="eyJ..."
-
-# Create an event (requires organizer or super_admin role)
+# 3. Create an event
 curl -X POST http://localhost:8080/api/events \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $TOKEN" \
   -d '{"title":"Tech Summit","description":"Annual conference","event_type":"conference","start_date":"2026-07-01 09:00:00","end_date":"2026-07-03 18:00:00","location":"Convention Center","max_capacity":200,"ticket_price":49.99}'
 
-# List events (paginated)
-curl "http://localhost:8080/api/events?page=1&page_size=10" -H "Authorization: Bearer $TOKEN"
-
-# Update an event (requires version for optimistic concurrency)
-curl -X PUT http://localhost:8080/api/events/1 \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer $TOKEN" \
-  -d '{"title":"Tech Summit 2026","version":1}'
-
-# Cancel an event (requires version query param)
-curl -X DELETE "http://localhost:8080/api/events/1?version=2" \
-  -H "Authorization: Bearer $TOKEN"
-
-# Register for event (user_id derived from JWT token)
+# 4. Register for event
 curl -X POST http://localhost:8080/api/registrations \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $TOKEN" \
   -d '{"event_id":1,"payment_method":"card"}'
-
-# View notifications (scoped to own user)
-curl http://localhost:8080/api/notifications/user/1 \
-  -H "Authorization: Bearer $TOKEN"
 ```
+
+---
+
+## Project Structure
+
+```mermaid
+blockdiag
+    blockdiag {
+        orientation = portrait
+        spanned = true
+
+        EVENT["event-management-cloud/\nRoot Project"]
+
+        DOCKER["docker-compose files\ndev · test · prod · monitoring"]
+        DOCS["docs/\nArchitecture · Services\nInfrastructure · API · Deployment"]
+        SERVICES["services/\nuser · event · registration · notification"]
+        NGINX["nginx/\nAPI Gateway + Frontend"]
+        K8S["k8s/\nManifests · ConfigMaps · Deployments"]
+        HELM["helm/\nProduction Helm Chart"]
+        MON["monitoring/\nPrometheus · Grafana · Loki"]
+        TESTS["tests/\nIntegration Tests"]
+
+        EVENT -> DOCKER & DOCS & SERVICES & NGINX & K8S & HELM & MON & TESTS
+
+        SERVICES -> USER["user-service/\nFastAPI :8001"]
+        SERVICES -> EVENT["event-service/\nFastAPI :8002"]
+        SERVICES -> REG["registration-service/\nFastAPI :8003"]
+        SERVICES -> NOTIF["notification-service/\nFastAPI :8004"]
+
+        style EVENT fill:#1a1a2e,color:#00d9ff
+        style DOCKER fill:#16213e,color:#e94560
+        style DOCS fill:#16213e,color:#e94560
+        style SERVICES fill:#0f3460,color:#00d9ff
+        style NGINX fill:#0f3460,color:#00d9ff
+        style K8S fill:#0f3460,color:#00d9ff
+        style HELM fill:#0f3460,color:#00d9ff
+        style MON fill:#0f3460,color:#00d9ff
+        style TESTS fill:#0f3460,color:#00d9ff
+    }
+```
+
+### Folder Descriptions
+
+#### `services/`
+Four independent FastAPI microservices. Each has its own Dockerfile, requirements.txt, and Alembic migrations with isolated version tables to avoid conflicts in the shared PostgreSQL database.
+
+- **Shared patterns:** DB connection pooling, Redis singleton, RabbitMQ publisher, Prometheus instrumentation, CORS middleware, JWT auth, RBAC, structured JSON logging with correlation IDs
+
+#### `nginx/`
+API gateway + static frontend. Routes external requests, enforces rate limits (5 req/s auth, 30 req/s API), serves HTML pages.
+
+#### `monitoring/`
+Prometheus (8 scrape targets), Grafana (auto-provisioned datasources + 15-panel dashboard), Loki + Promtail (log aggregation), alert rules.
+
+#### `k8s/`
+11 Deployments, 1 DaemonSet, 12 Services, 1 ConfigMap, 1 Secret, 2 PVCs, RBAC for Prometheus.
+
+#### `helm/`
+Production-ready Helm chart with configurable values for replicas, resources, images, and infrastructure toggles.
 
 ---
 
 ## Environments
 
+```mermaid
+flowchart LR
+    subgraph Dev["🛠️ Development (:8080)"]
+        D["Hot-reload\nExposed ports\nDebug logging\nVolume mounts"]
+    end
+
+    subgraph Test["🧪 Testing (:8081)"]
+        T["Isolated testdb\nTest-runner container\nAuto pytest"]
+    end
+
+    subgraph Prod["🚀 Production (:8082)"]
+        P["2 replicas each\nResource limits\nSecure credentials\nNo exposed infra"]
+    end
+
+    subgraph Monitor["📊 + Monitoring (any env)"]
+        M["Prometheus :9090\nGrafana :3000\nLoki :3100"]
+    end
+
+    D & T & P -.-> M
+
+    style Dev fill:#1a1a2e,stroke:#00d9ff,color:#00d9ff
+    style Test fill:#16213e,stroke:#e94560,color:#e94560
+    style Prod fill:#0f3460,stroke:#00d9ff,color:#00d9ff
+    style Monitor fill:#1a1a2e,stroke:#e94560,color:#e94560
+```
+
 | Environment | Command | Port | DB | Special Features |
 |-------------|---------|------|----|-----------------|
-| **Development** | `-f docker-compose.yml -f docker-compose.dev.yml up` | 8080 | eventdb | Hot-reload, exposed service ports, debug logging |
+| **Development** | `-f docker-compose.yml -f docker-compose.dev.yml up` | 8080 | eventdb | Hot-reload, exposed service ports |
 | **Testing** | `-f docker-compose.yml -f docker-compose.test.yml up` | 8081 | testdb | Isolated DB, test-runner container |
-| **Production** | `-f docker-compose.yml -f docker-compose.prod.yml up` | 8082 | eventdb_prod | 2 replicas, resource limits, secure credentials |
-| **+ Monitoring** | Append `-f docker-compose.monitoring.yml` to any | — | — | Prometheus, Grafana, Loki, exporters |
-
-### Development
-
-```bash
-docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build
-```
-
-- Volume mounts for hot-reload (code changes reflected without rebuild)
-- Direct service port access for debugging (8001-8004)
-- PostgreSQL and Redis ports exposed for local tools
-- Debug-level logging
-
-### Testing
-
-```bash
-docker compose -f docker-compose.yml -f docker-compose.test.yml up --build
-```
-
-- Separate `testdb` database
-- Test runner container (pytest) auto-runs and exits
-- Services use isolated volume (`postgres_test_data`)
-
-### Production
-
-```bash
-docker compose -f docker-compose.yml -f docker-compose.prod.yml up --build -d
-```
-
-- User/Event services: 2 replicas each
-- Resource limits per service (CPU/memory)
-- Production database (`eventdb_prod`)
-- Credentials via environment variables (`${DB_PASSWORD}`, etc.)
-- No exposed infrastructure ports (postgres, redis internal only)
+| **Production** | `-f docker-compose.yml -f docker-compose.prod.yml up` | 8082 | eventdb_prod | 2 replicas, resource limits |
+| **+ Monitoring** | Append `-f docker-compose.monitoring.yml` to any | — | — | Prometheus, Grafana, Loki |
 
 ---
 
@@ -522,11 +525,9 @@ All endpoints are accessed through the nginx gateway at `http://localhost:8080/a
 
 ### Payment Processing
 
-The registration service includes a mock payment gateway supporting:
-
 | Method | Behavior |
 |--------|----------|
-| `free` | Always succeeds (for events with ticket_price=0) |
+| `free` | Always succeeds (ticket_price=0) |
 | `card` / `credit_card` | 95% success, 5% random decline |
 | `paypal` | 95% success, 5% random decline |
 | `bank_transfer` | 95% success, 5% random decline |
@@ -552,18 +553,9 @@ On payment failure, the system automatically performs a compensating transaction
 
 ### Grafana Dashboard (15 panels)
 
-- Service Status (4 panels)
-- Infrastructure Status (PostgreSQL, Redis, RabbitMQ)
-- Request Rate (req/s per service)
-- Response Time (p50, p95, p99)
-- Error Rate (5xx responses)
-- CPU / Memory per container
-- Database connections
-- Redis hit rate
+Service Status · Infrastructure Status · Request Rate · Response Time · Error Rate · CPU/Memory · DB connections · Redis hit rate
 
 ### Alerting
-
-Prometheus alert rules and Grafana unified alerting are pre-configured:
 
 | Alert | Condition | Severity |
 |-------|-----------|----------|
@@ -572,13 +564,11 @@ Prometheus alert rules and Grafana unified alerting are pre-configured:
 | HighResponseTime | p95 latency > 2s for 5m | Warning |
 | PostgresConnectionsHigh | Active connections > 80 for 5m | Warning |
 | RedisMemoryHigh | Memory usage > 90% for 5m | Warning |
-| RabbitMQQueueDepthHigh | notification_queue > 1000 messages for 10m | Warning |
-
-Alert rules: `monitoring/alert_rules.yml`, Grafana alerts: `monitoring/grafana-alerts.yml`
+| RabbitMQQueueDepthHigh | notification_queue > 1000 for 10m | Warning |
 
 ### Log Aggregation
 
-All services emit structured JSON logs with fields: `timestamp`, `level`, `service`, `message`, `correlation_id`. Promtail collects container logs from Docker and ships them to Loki. Query in Grafana Explore:
+All services emit structured JSON logs: `timestamp`, `level`, `service`, `message`, `correlation_id`. Query in Grafana Explore:
 
 ```
 {service="user-service"}
@@ -588,14 +578,12 @@ All services emit structured JSON logs with fields: `timestamp`, `level`, `servi
 
 ---
 
-## Kubernetes Deployment
+## Deployment
 
-### Helm Chart
-
-A production-ready Helm chart is available at `helm/event-management/`:
+### Helm Chart (Recommended)
 
 ```bash
-# Install via Helm
+# Install
 helm install event-management ./helm/event-management
 
 # Upgrade
@@ -605,52 +593,31 @@ helm upgrade event-management ./helm/event-management
 helm uninstall event-management
 ```
 
-**Chart features:**
-- Parameterized replicas, resources, images via `values.yaml`
-- ConfigMap + Secret auto-generated from values
-- Infrastructure toggles (postgres, redis, rabbitmq can be disabled)
-- Persistent volume claims for stateful services
+Features: Parameterized replicas/resources/images · ConfigMap + Secret auto-generated · Infrastructure toggles · PVCs for stateful services
 
 ### ArgoCD (GitOps)
 
-An ArgoCD Application manifest is provided at `k8s/argocd/application.yaml`:
-
 ```bash
-# Apply ArgoCD application
 kubectl apply -f k8s/argocd/application.yaml
 ```
 
-- Auto-sync enabled with self-heal
-- Prunes deleted resources automatically
+- Auto-sync with self-heal enabled
+- Prunes deleted resources
 - Retries failed syncs (5 attempts, exponential backoff)
-- Monitors the `main` branch of the GitHub repository
 
-### Raw K8s Manifests (Alternative)
-
-### Prerequisites
-
-- Minikube
-- kubectl
-- Docker (images built locally)
-
-### Deploy
+### Raw Kubernetes Manifests
 
 ```bash
-# Start Minikube
-minikube start
-
-# Build images in Minikube's Docker daemon
+minikube start --driver=docker --cpus=2 --memory=2048
 eval $(minikube docker-env)
 docker compose -f docker-compose.yml build
 
-# Apply manifests
 kubectl apply -f k8s/configmaps/
 kubectl apply -f k8s/services/
 kubectl apply -f k8s/deployments/
 kubectl apply -f k8s/monitoring/
 
-# Wait for pods
-kubectl get pods -w
+minikube service nginx --url
 ```
 
 ### K8s Resources Summary
@@ -658,28 +625,11 @@ kubectl get pods -w
 | Type | Count | Details |
 |------|-------|---------|
 | Deployments | 11 | 4 services + postgres + redis + rabbitmq + nginx + prometheus + grafana + loki |
-| DaemonSets | 1 | promtail (log collection on every node) |
-| Services | 12 | ClusterIP for internal, NodePort for external |
-| ConfigMaps | 1 | Application configuration |
+| DaemonSets | 1 | promtail |
+| Services | 12 | ClusterIP + NodePort |
+| ConfigMaps | 1 | App configuration |
 | Secrets | 1 | DB, Redis, RabbitMQ credentials |
-| PVCs | 2 | postgres (1Gi), redis (512Mi) |
-| ServiceAccounts | 1 | Prometheus |
-| ClusterRoles | 1 | Prometheus kube-api access |
-| ClusterRoleBindings | 1 | Prometheus RBAC binding |
-| ArgoCD Applications | 1 | GitOps deployment from GitHub |
-
----
-
-## CI/CD
-
-### GitHub Actions Pipeline
-
-`.github/workflows/ci.yml` runs on every push and pull request:
-
-1. Checks out code
-2. Sets up Docker Buildx
-3. Builds all service images
-4. Runs integration tests via `manage.sh test`
+| PVCs | 2 | postgres 1Gi, redis 512Mi |
 
 ---
 
@@ -687,26 +637,23 @@ kubectl get pods -w
 
 ```bash
 # Run integration tests
-docker compose -f docker-compose.yml -f docker-compose.test.yml up --build test-runner
-
-# Or use the management script
 ./manage.sh test
+
+# Or manually
+docker compose -f docker-compose.yml -f docker-compose.test.yml up --build test-runner
 ```
 
-### Test Coverage
-
-38 integration tests covering:
+### Test Coverage (38 tests)
 
 - **Health checks**: All services + gateway + circuit breaker state
-- **User authentication**: Register, login, duplicate prevention, wrong password, invalid tokens
-- **RBAC**: Role-based access (attendee cannot create events, organizer can, admin role management)
-- **Input validation**: Password length, email format, role validation, payment method
-- **Event CRUD**: Create, list (paginated), get, nonexistent returns 404
-- **Optimistic concurrency**: Correct version updates succeed, stale version returns 409
-- **Registration**: Register, duplicate returns 409, paginated listing, nonexistent event
-- **Correlation IDs**: Custom correlation ID returned, auto-generated when missing
-- **Notifications**: Create, get user notifications, DLQ stats endpoint
-- **Ownership scoping**: Users cannot access other users' registrations/notifications
+- **User auth**: Register, login, duplicate prevention, wrong password, invalid tokens
+- **RBAC**: Role-based access enforcement
+- **Input validation**: Password, email, role, payment method
+- **Event CRUD**: Create, list, get, 404 handling
+- **Optimistic concurrency**: Correct version updates, stale version returns 409
+- **Registration**: Register, duplicate returns 409, paginated listing
+- **Correlation IDs**: Custom ID propagation, auto-generation
+- **Notifications**: Create, get, DLQ stats, ownership scoping
 
 ---
 
@@ -714,40 +661,24 @@ docker compose -f docker-compose.yml -f docker-compose.test.yml up --build test-
 
 ### Tables
 
-| Table | Service | Columns |
-|-------|---------|---------|
-| `users` | user-service | id, username, email, password_hash, full_name, **role**, created_at, is_active |
-| `events` | event-service | id, title, description, event_type, start_date, end_date, location, max_capacity, registered_count, organizer_id, ticket_price, status, **version**, created_at |
-| `registrations` | registration-service | id, user_id, event_id, registration_date, status, payment_method, payment_status, payment_reference, payment_gateway, payment_processed_at, ticket_number, notes |
-| `notifications` | notification-service | id, user_id, title, message, notification_type, is_read, created_at |
+| Table | Service | Key Columns |
+|-------|---------|-------------|
+| `users` | user-service | id, username, email, password_hash, role, is_active |
+| `events` | event-service | id, title, organizer_id, max_capacity, registered_count, **version** |
+| `registrations` | registration-service | id, user_id, event_id, status, ticket_number |
+| `notifications` | notification-service | id, user_id, is_read |
 
 ### Indexes
 
 | Table | Index | Purpose |
 |-------|-------|---------|
-| `users` | `idx_users_email` | Fast email lookup (WHERE is_active=TRUE) |
+| `users` | `idx_users_email` | Fast email lookup |
 | `events` | `idx_events_status_type` | Filter by status + event_type |
 | `events` | `idx_events_start_date` | Sort by date |
-| `events` | `idx_events_organizer` | Lookup events by organizer (ownership scoping) |
+| `events` | `idx_events_organizer` | Ownership scoping |
 | `registrations` | `idx_reg_user` | User's registrations |
 | `registrations` | `idx_reg_event_status` | Event attendees |
-| `notifications` | `idx_notifications_user_read` | User's notifications with read filter |
-
-### Connection Pooling
-
-Each service uses `psycopg2.pool.ThreadedConnectionPool(minconn=2, maxconn=10)` to reuse database connections across requests. Pool sizes and timeouts are configurable via environment variables:
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `DB_POOL_MIN` | `2` | Minimum connections kept open |
-| `DB_POOL_MAX` | `10` | Maximum connections allowed |
-| `DB_CONNECT_TIMEOUT` | `5` | Connection timeout in seconds |
-| `CACHE_TTL` | `30` | Redis cache TTL in seconds for event listings |
-| `CB_FAILURE_THRESHOLD` | `5` | Failures before circuit breaker opens |
-| `CB_RECOVERY_TIMEOUT` | `30` | Seconds before circuit breaker enters half-open |
-| `CB_HALF_OPEN_MAX` | `3` | Successful calls in half-open to close breaker |
-| `DLQ_MAX_RETRIES` | `3` | Max message processing retries before DLQ |
-| `DLQ_BACKOFF_BASE` | `1.0` | Base backoff seconds for retry delays |
+| `notifications` | `idx_notifications_user_read` | User notification feed |
 
 ---
 
@@ -759,7 +690,7 @@ Each service uses `psycopg2.pool.ThreadedConnectionPool(minconn=2, maxconn=10)` 
 Commands:
   up dev|test|prod       Start environment
   down dev|test|prod     Stop environment
-  down-all               Stop all environments simultaneously
+  down-all               Stop all environments
   logs dev|test|prod     Tail logs
   build dev|test|prod    Rebuild images
   test                   Run integration tests
@@ -770,15 +701,13 @@ Commands:
 
 Examples:
   ./manage.sh up dev               # Start dev (http://localhost:8080)
-  ./manage.sh up dev --monitor     # + Prometheus, Grafana, Loki, Promtail
+  ./manage.sh up dev --monitor     # + Prometheus, Grafana, Loki
   ./manage.sh up prod              # Start prod (http://localhost:8082)
-  ./manage.sh down-all             # Stop everything
+  ./manage.sh down-all            # Stop everything
 ```
-
-Each environment uses a unique project name (`event-dev`, `event-test`, `event-prod`) so multiple environments can run simultaneously without container conflicts.
 
 ---
 
 ## License
 
-This project is built for educational purposes as part of a Cloud Computing & DevOps course.
+Built for educational purposes as part of a Cloud Computing & DevOps course.

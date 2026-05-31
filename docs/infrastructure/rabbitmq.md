@@ -4,6 +4,35 @@
 
 RabbitMQ is the async message broker for the event management system. Services publish events to a topic exchange, and the notification-service consumes them from a dedicated queue.
 
+```mermaid
+flowchart TB
+    subgraph Publishers["📤 Publishers"]
+        US["👤 User Service"]
+        ES["📅 Event Service"]
+        RS["🎫 Registration Service"]
+    end
+
+    subgraph MQ["🐰 RabbitMQ"]
+        EX["events\n(topic, durable)"]
+        Q["notification_queue\n(durable, prefetch=10)"]
+        DLX["notification_dlx\n(direct, durable)"]
+        DLQ["notification_dlx\n(dead letter queue)"]
+    end
+
+    subgraph Consumer["📥 Consumer"]
+        NS["🔔 Notification Service\n(consumer thread)"]
+    end
+
+    US & ES & RS -->|"publish\n(routing key)"| EX
+    EX -->|"user.*, event.*, registration.*"| Q
+    Q --> NS
+    Q -.x-death >= 3.-> DLX --> DLQ
+
+    style MQ fill:#16213e,stroke:#e94560,color:#e94560
+    style Publishers fill:#1a1a2e,stroke:#00d9ff,color:#00d9ff
+    style Consumer fill:#0f3460,stroke:#00d9ff,color:#00d9ff
+```
+
 | Property | Value |
 |----------|-------|
 | **Image** | `rabbitmq:3-management-alpine` |
@@ -16,25 +45,33 @@ RabbitMQ is the async message broker for the event management system. Services p
 
 ## Topology
 
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                        Exchange: "events"                           │
-│                        Type: topic (durable)                        │
-│                                                                     │
-│  user-service ─────── publishing key: "user.registered" ──────┐    │
-│  event-service ────── publishing key: "event.created" ────────┤    │
-│  registration-svc ─── publishing key: "registration.confirmed" ┤   │
-│  registration-svc ─── publishing key: "registration.cancelled" ┤   │
-│                                                              │    │
-│                                            ┌─────────────────┘    │
-│                                            ▼                      │
-│                                   notification_queue               │
-│                                   (durable, 1 consumer)            │
-│                                            │                      │
-│                                            ▼                      │
-│                                   notification-service             │
-│                                   (background thread)              │
-└─────────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TB
+    subgraph ExchangeLayer["📡 Exchange: events (topic, durable)"]
+        K1["user.registered"]
+        K2["event.created"]
+        K3["registration.confirmed"]
+        K4["registration.cancelled"]
+    end
+
+    subgraph QueueLayer["📋 notification_queue (durable)"]
+        Q1["x-dead-letter-exchange: notification_dlx"]
+        Q2["x-dead-letter-routing-key: notification_queue"]
+        Q3["Binding: user.*"]
+        Q4["Binding: event.*"]
+        Q5["Binding: registration.*"]
+    end
+
+    subgraph ConsumerLayer["🔔 notification-service"]
+        C["rabbitmq_consumer()\n(daemon thread)\nbasic_consume + basic_ack"]
+    end
+
+    K1 & K2 & K3 & K4 --> Q3 & Q4 & Q5
+    Q3 & Q4 & Q5 --> C
+
+    style ExchangeLayer fill:#1a1a2e,stroke:#00d9ff,color:#00d9ff
+    style QueueLayer fill:#16213e,stroke:#e94560,color:#e94560
+    style ConsumerLayer fill:#0f3460,stroke:#00d9ff,color:#00d9ff
 ```
 
 ---
@@ -70,6 +107,45 @@ channel.exchange_declare(
 
 ---
 
+## Message Flow
+
+```mermaid
+sequenceDiagram
+    participant P as Publisher
+    participant EX as events exchange
+    participant Q as notification_queue
+    participant NS as Notification Service
+    participant PG as PostgreSQL
+
+    P->>+EX: basic_publish(routing_key, body)
+    EX->>+Q: Route message to queue
+    Q->>+NS: basic_deliver (on_message_callback)
+
+    alt Processing succeeds
+        NS->>+PG: INSERT notification
+        PG-->-NS: notification created
+        NS-->-Q: basic_ack
+    else Processing fails
+        NS-->-Q: basic_nack(requeue=True)
+        Note over Q: Message requeued, will retry (up to 3x via x-death)
+
+        loop After 3 failures
+            Q->>+NS: basic_deliver
+            NS->>NS: Try processing again
+            alt Success
+                NS->>PG: INSERT notification
+                PG-->-NS: created
+                NS-->-Q: basic_ack
+            else Fail again
+                NS-->-Q: basic_nack(requeue=False)
+                Note over Q: x-death >= 3, route to DLX
+            end
+        end
+    end
+```
+
+---
+
 ## Message Format
 
 All messages are JSON with `content_type: application/json` and `delivery_mode: 2` (persistent).
@@ -101,6 +177,19 @@ All messages are JSON with `content_type: application/json` and `delivery_mode: 
 
 ## Publisher Configuration
 
+```mermaid
+flowchart TB
+    subgraph Publisher["📤 Publisher Service"]
+        PS["Publish function\n(json.dumps(payload))"]
+        CH["RabbitMQ Channel\n(singleton per service)"]
+    end
+
+    PS --> CH -->|"basic_publish\nexchange=events\nrouting_key=*\ndelivery_mode=2"| MQ
+
+    style Publisher fill:#1a1a2e,stroke:#00d9ff,color:#00d9ff
+    style MQ fill:#16213e,stroke:#e94560,color:#e94560
+```
+
 All publishing services (user, event, registration) use the same pattern:
 
 ```python
@@ -124,6 +213,23 @@ def publish_event(routing_key: str, payload: dict):
 ---
 
 ## Consumer Configuration (notification-service)
+
+```mermaid
+flowchart TB
+    subgraph Consumer["🔔 Notification Service"]
+        T["Daemon Thread\n(startup event)"]
+        C["pika.BlockingConnection\n(heartbeat=600s)"]
+        CH["Channel\n(exchange_declare + queue_declare)"]
+        B["Queue Bindings\nuser.*, event.*, registration.*"]
+        Q["basic_qos(prefetch_count=10)"]
+        BC["basic_consume\n(on_message_callback)"]
+        START["start_consuming()"]
+    end
+
+    T --> C --> CH --> B --> Q --> BC --> START
+
+    style Consumer fill:#16213e,stroke:#e94560,color:#e94560
+```
 
 The consumer runs in a daemon thread:
 
@@ -188,6 +294,27 @@ Credentials are passed via environment variables, not hardcoded. Kubernetes uses
 ---
 
 ## Monitoring
+
+```mermaid
+flowchart LR
+    subgraph Tools["🔧 Tools"]
+        UI["Management UI\nhttp://localhost:15672"]
+        API["REST API\n/api/queues/%2F/..."]
+        PROM["Prometheus Exporter\n(rabbitmq_exporter)\n:future enhancement:"]
+    end
+
+    subgraph Metrics["📊 Metrics"]
+        Q["Queue depth\nnotification_queue length"]
+        M["Message rates\npublish/consume"]
+        DL["DLQ depth\nnotification_dlx length"]
+    end
+
+    UI & API --> Metrics
+    PROM -.future.-> Metrics
+
+    style Tools fill:#1a1a2e,stroke:#00d9ff,color:#00d9ff
+    style Metrics fill:#16213e,stroke:#e94560,color:#e94560
+```
 
 - **Management UI:** http://localhost:15672 (guest/guest in dev)
 - **Queue status:** `GET /api/queues/%2F/notification_queue`

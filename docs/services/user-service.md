@@ -1,8 +1,42 @@
 # User Service
 
+> Manages user accounts: registration, authentication, profile retrieval, and soft-deletion.
+
+---
+
 ## Overview
 
-Manages user accounts: registration, authentication, profile retrieval, and soft-deletion.
+```mermaid
+flowchart TB
+    subgraph External["📥 Requests via Nginx"]
+        REGISTER["POST /users/register"]
+        LOGIN["POST /users/login"]
+        GET_ME["GET /users/me"]
+        GET_USERS["GET /users"]
+        GET_USER["GET /users/{id}"]
+        UPDATE_ROLE["PUT /users/{id}/role"]
+        DELETE_USER["DELETE /users/{id}"]
+    end
+
+    subgraph Service["👤 User Service (:8000 → :8001 dev)"]
+        JWT["🔐 JWT Generator\nHS256, 24h expiry\nRole claims"]
+        BCRYPT["🔒 bcrypt\n12 rounds hashing"]
+        PG["🐘 PostgreSQL\nusers table\nidx_users_email"]
+        RD["📡 Redis\nsession:<jwt>\n24h TTL"]
+        MQ["🐰 RabbitMQ\nPublish: user.registered"]
+    end
+
+    REGISTER --> BCRYPT --> PG
+    LOGIN --> JWT --> RD
+    GET_ME & GET_USERS & GET_USER --> PG
+    UPDATE_ROLE --> PG
+    DELETE_USER --> PG
+
+    PG -.publish.-> MQ
+
+    style Service fill:#16213e,stroke:#e94560,color:#e94560
+    style External fill:#1a1a2e,stroke:#00d9ff,color:#00d9ff
+```
 
 | Property | Value |
 |----------|-------|
@@ -12,6 +46,51 @@ Manages user accounts: registration, authentication, profile retrieval, and soft
 | **RabbitMQ Publishing** | `user.registered` |
 | **Auth** | JWT (PyJWT, HS256, 24h expiry, RBAC with role claims) |
 | **Dockerfile** | Multi-stage `python:3.11-slim` |
+
+---
+
+## Architecture
+
+### Component Interaction
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant NG as Nginx
+    participant US as User Service
+    participant PG as PostgreSQL
+    participant RD as Redis
+    participant MQ as RabbitMQ
+    participant NS as Notification Service
+
+    Note over US: User Registration Flow
+    C->>+NG: POST /api/users/register {username, email, password, role}
+    NG->>+US: POST /users/register
+    US->>US: bcrypt.hash(password, 12 rounds)
+    US->>+PG: INSERT INTO users (username, email, password_hash, role)
+    PG-->-US: user created (id=1)
+    US->>RD: SETEX session:<jwt> 86400 {user_data}
+    US->>MQ: Publish {event: user_registered, user_id: 1, ...}
+    US-->-NG: 201 {user, message}
+    NG-->-C: 201 OK
+
+    Note over MQ,NS: Async notification
+    MQ->>+NS: user.registered
+    NS->>+PG: INSERT INTO notifications (Welcome!)
+    PG-->-NS: notification created
+    NS-->-MQ: ack
+
+    Note over US: User Login Flow
+    C->>+NG: POST /api/users/login {email, password}
+    NG->>+US: POST /users/login
+    US->>+PG: SELECT FROM users WHERE email=?
+    PG-->-US: user record
+    US->>US: bcrypt.verify(input_password, stored_hash)
+    US->>US: PyJWT.encode({user_id, role, ...}, HS256)
+    US->>RD: SETEX session:<jwt> 86400 {user_data}
+    US-->-NG: 200 {token, user}
+    NG-->-C: 200 OK
+```
 
 ---
 
@@ -46,6 +125,22 @@ CREATE TABLE IF NOT EXISTS users (
 CREATE INDEX IF NOT EXISTS idx_users_email ON users(email) WHERE is_active=TRUE;
 ```
 
+### Schema Diagram
+
+```mermaid
+erDiagram
+    users {
+        int id PK
+        varchar username UK NN
+        varchar email UK NN
+        varchar password_hash NN
+        varchar full_name
+        timestamp created_at
+        bool is_active
+        varchar role
+    }
+```
+
 ---
 
 ## Endpoints
@@ -68,7 +163,7 @@ Register a new user.
   "email": "alice@test.com",
   "password": "Password123",
   "full_name": "Alice Smith",
-  "role": "attendee"
+  "role": "organizer"
 }
 ```
 
@@ -81,7 +176,7 @@ Register a new user.
     "username": "alice",
     "email": "alice@test.com",
     "full_name": "Alice Smith",
-    "role": "attendee",
+    "role": "organizer",
     "created_at": "2026-05-10 18:15:57.750469"
   }
 }
@@ -243,6 +338,25 @@ Update a user's role. super_admin only.
 **Errors:**
 - `403` — Not a super_admin
 - `400` — Invalid role (must be super_admin/organizer/attendee)
+
+---
+
+## JWT Token Structure
+
+```mermaid
+flowchart LR
+    subgraph Token["🎫 JWT Token (HS256)"]
+        HEADER["{alg: HS256, typ: JWT}"]
+        PAYLOAD["{user_id: 1,\nusername: alice,\nrole: organizer,\nexp: +24h}"]
+        SIG["signature"]
+    end
+
+    HEADER --> PAYLOAD --> SIG
+
+    style Token fill:#1a1a2e,stroke:#00d9ff,color:#00d9ff
+```
+
+Token is stored in Redis with key `session:<jwt>` and 24h TTL.
 
 ---
 

@@ -2,10 +2,39 @@
 
 ## Overview
 
-Redis serves as a secondary pub-sub channel, token cache, and response cache for the event management system. It is used for:
-1. **Token storage** — Login tokens stored with TTL
-2. **Pub-Sub publishing** — Services publish events as a backup to RabbitMQ
-3. **Response caching** — Event listings cached to reduce database load
+Redis serves as a secondary pub-sub channel, token cache, and response cache for the event management system.
+
+```mermaid
+flowchart TB
+    subgraph Clients["⚙️ Services"]
+        US["👤 User Service"]
+        ES["📅 Event Service"]
+        RS["🎫 Registration Service"]
+        NS["🔔 Notification Service"]
+    end
+
+    subgraph Uses["📡 Redis Usage"]
+        T["🔐 Token Cache\nsession:<jwt>\nTTL: 24h"]
+        C["💾 Response Cache\nevents:list:*\nTTL: 30s"]
+        P["📬 Pub/Sub Channels\nuser_events, event_events\nnotification_events"]
+    end
+
+    subgraph Redis["📡 Redis :6379"]
+        RD["redis:7-alpine\nAOF persistence\nappendonly yes"]
+    end
+
+    US --> T
+    ES --> C
+    RS --> P
+    US --> P
+    ES --> P
+
+    T & C & P --> RD
+
+    style Redis fill:#16213e,stroke:#e94560,color:#e94560
+    style Clients fill:#1a1a2e,stroke:#00d9ff,color:#00d9ff
+    style Uses fill:#0f3460,stroke:#00d9ff,color:#00d9ff
+```
 
 | Property | Value |
 |----------|-------|
@@ -20,6 +49,23 @@ Redis serves as a secondary pub-sub channel, token cache, and response cache for
 
 ### Token Storage (user-service)
 
+```mermaid
+flowchart TB
+    LOGIN["Login → JWT token generated"]
+    STORE["Redis: SETEX session:<jwt> 86400 {user_data}"]
+    LOOKUP["Subsequent requests → Authorization: Bearer <jwt>"]
+    CHECK["Check Redis: GET session:<jwt>"]
+    VALID{"Found?"}
+    VALID -->|"Yes"| NEXT["✅ Proceed with request"]
+    VALID -->|"No"| REJECT["❌ Reject (token expired/invalid)"]
+
+    LOGIN --> STORE --> LOOKUP --> CHECK --> VALID
+
+    style LOGIN fill:#1a1a2e,stroke:#00d9ff,color:#00d9ff
+    style STORE fill:#16213e,stroke:#e94560,color:#e94560
+    style VALID fill:#0f3460,stroke:#00d9ff,color:#00d9ff
+```
+
 After login, the user-service stores the JWT token in Redis with a 24-hour TTL:
 
 ```python
@@ -31,7 +77,23 @@ Note: Key prefix changed from `token:` to `session:`, and the token is now a JWT
 
 ### Pub-Sub Publishing
 
-Services publish events to Redis channels as a secondary notification path:
+```mermaid
+flowchart TB
+    subgraph Channels["📡 Redis Pub/Sub Channels"]
+        CH1["user_events\n(published by: user-service)"]
+        CH2["event_events\n(published by: event-service)"]
+        CH3["notification_events\n(published by: registration-service)"]
+    end
+
+    subgraph Note["ℹ️ Note"]
+        N["notification-service does NOT subscribe\n(only RabbitMQ) to avoid duplicate notifications"]
+    end
+
+    CH1 & CH2 & CH3 -.backup.-> N
+
+    style Channels fill:#1a1a2e,stroke:#00d9ff,color:#00d9ff
+    style Note fill:#16213e,stroke:#e94560,color:#e94560
+```
 
 | Service | Channel | Event |
 |---------|---------|-------|
@@ -42,6 +104,38 @@ Services publish events to Redis channels as a secondary notification path:
 **Note:** The notification-service does NOT subscribe to Redis channels — it only consumes from RabbitMQ to prevent duplicate notifications.
 
 ### Event Listing Cache
+
+```mermaid
+flowchart TB
+    subgraph Request["📥 GET /events Request"]
+        R1["Build cache key:\nevents:list:{status}:{type}:{page}:{size}"]
+        R2["Check Redis"]
+    end
+
+    subgraph HIT["✅ Cache Hit"]
+        H1["Return cached JSON"]
+        H2["No DB query"]
+    end
+
+    subgraph MISS["❌ Cache Miss"]
+        M1["Query PostgreSQL"]
+        M2["Store in Redis (30s TTL)"]
+        M3["Return response"]
+    end
+
+    subgraph INV["🗑️ Invalidation on Write"]
+        W1["POST /events, PUT /events/{id}, DELETE /events/{id}"]
+        W2["DELETE events:list:*"]
+    end
+
+    R1 --> R2 --> HIT & MISS
+    W1 --> W2
+
+    style Request fill:#1a1a2e,stroke:#00d9ff,color:#00d9ff
+    style HIT fill:#0f3460,stroke:#00d9ff,color:#00d9ff
+    style MISS fill:#16213e,stroke:#e94560,color:#e94560
+    style INV fill:#16213e,stroke:#e94560,color:#e94560
+```
 
 The event service caches `GET /events` responses in Redis to reduce database load on high-traffic list endpoints.
 
@@ -71,6 +165,22 @@ events:list:{status}:{event_type}:{page}:{page_size}
 ---
 
 ## Connection Configuration
+
+```mermaid
+flowchart TB
+    subgraph Singleton["📦 Redis Singleton (per service)"]
+        GET["get_redis()"]
+        CHECK{_redis_client is None?}
+        CREATE["redis.Redis(\nhost, port,\ndecode_responses=True,\nsocket_timeout=5s,\nretry_on_timeout=True)"]
+        RETURN["Return singleton"]
+    end
+
+    GET --> CHECK
+    CHECK -->|"Yes"| CREATE --> RETURN
+    CHECK -->|"No"| RETURN
+
+    style Singleton fill:#16213e,stroke:#e94560,color:#e94560
+```
 
 Each service creates a Redis singleton:
 
@@ -127,6 +237,28 @@ Password authentication enabled in production. Services pass `REDIS_PASSWORD` vi
 
 ## Monitoring
 
+```mermaid
+flowchart TB
+    subgraph Exporters["📊 Prometheus Exporters"]
+        RE["📡 redis_exporter\n:v1.55.0 :9121"]
+        NE["🖥️ node-exporter\n:v1.7.0 :9100"]
+    end
+
+    subgraph Prometheus["📊 Prometheus"]
+        P["Scrape targets:\nredis_exporter :9121\nnode_exporter :9100"]
+    end
+
+    subgraph Grafana["📈 Grafana"]
+        G["Redis Dashboard\n(memory, keys, hit rate)"]
+    end
+
+    RE & NE --> P --> G
+
+    style Exporters fill:#1a1a2e,stroke:#00d9ff,color:#00d9ff
+    style Prometheus fill:#16213e,stroke:#e94560,color:#e94560
+    style Grafana fill:#0f3460,stroke:#00d9ff,color:#00d9ff
+```
+
 - **Redis Exporter:** `oliver006/redis_exporter:v1.55.0` exposes metrics at `:9121`
 - **Prometheus scrapes:** `http://redis-exporter:9121/metrics`
 - **Grafana dashboard:** Redis metrics included in the overview dashboard
@@ -134,6 +266,37 @@ Password authentication enabled in production. Services pass `REDIS_PASSWORD` vi
 ---
 
 ## Kubernetes
+
+```mermaid
+flowchart TB
+    subgraph K8s["☸️ Kubernetes"]
+        subgraph Deploy["📦 Deployments"]
+            D1["redis Deployment\n(replicas: 1)"]
+        end
+
+        subgraph Storage["💾 Persistent Storage"]
+            PVC["redis-pvc\n(512Mi, ReadWriteOnce)"]
+        end
+
+        subgraph Svc["🔌 Services"]
+            SVC["redis-service\n(ClusterIP :6379)"]
+        end
+
+        subgraph Sec["🔐 Secrets"]
+            SEC["event-mgmt-secrets\n(REDIS_PASSWORD via secretKeyRef)"]
+        end
+
+        D1 --> PVC
+        D1 --> SVC
+        D1 -.envFrom.-> SEC
+    end
+
+    style K8s fill:#1a1a2e,stroke:#00d9ff,color:#00d9ff
+    style Deploy fill:#16213e,stroke:#e94560,color:#e94560
+    style Storage fill:#0f3460,stroke:#00d9ff,color:#00d9ff
+    style Svc fill:#16213e,stroke:#e94560,color:#e94560
+    style Sec fill:#0f3460,stroke:#e94560,color:#e94560
+```
 
 - **Deployment:** Redis container with resource limits
 - **PVC:** `redis-pvc` (512Mi storage)

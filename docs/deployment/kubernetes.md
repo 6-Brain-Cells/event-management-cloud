@@ -4,17 +4,68 @@
 
 The project includes Kubernetes manifests for deploying the full stack to a Minikube cluster. All images use `imagePullPolicy: Never` — they must be built inside Minikube's Docker daemon.
 
----
+```mermaid
+flowchart TB
+    subgraph K8s["☸️ Kubernetes Cluster"]
+        subgraph Nodes["👤 Nodes"]
+            N1["Minikube Node\n(Docker driver)"]
+        end
 
-## Prerequisites
+        subgraph Pods["📦 Pods"]
+            P1["user-service (×2)"]
+            P2["event-service (×2)"]
+            P3["registration-service (×2)"]
+            P4["notification-service (×1)"]
+            P5["postgres (×1)"]
+            P6["redis (×1)"]
+            P7["rabbitmq (×1)"]
+            P8["nginx (×1)"]
+            P9["prometheus (×1)"]
+            P10["grafana (×1)"]
+            P11["loki (×1)"]
+            P12["promtail (DaemonSet)"]
+        end
 
-- Minikube (`minikube start --memory=8192 --cpus=4`)
-- kubectl
-- Docker
+        subgraph Services["🔌 Services"]
+            S1["ClusterIP (internal)"]
+            S2["NodePort (nginx :30080)"]
+        end
+
+        subgraph Storage["💾 PVCs"]
+            PVC1["postgres-pvc (1Gi)"]
+            PVC2["redis-pvc (512Mi)"]
+        end
+
+        N1 --> Pods
+        Pods --> Services
+        P5 --> PVC1
+        P6 --> PVC2
+    end
+
+    style K8s fill:#16213e,stroke:#e94560,color:#e94560
+```
 
 ---
 
 ## Quick Start
+
+```mermaid
+flowchart TB
+    subgraph Steps["⚡ Deployment Steps"]
+        S1["minikube start\n--driver=docker --cpus=2 --memory=2048"]
+        S2["eval $(minikube docker-env)"]
+        S3["docker build ... (build images inside Minikube)"]
+        S4["kubectl apply -f k8s/configmaps/"]
+        S5["kubectl apply -f k8s/services/"]
+        S6["kubectl apply -f k8s/deployments/"]
+        S7["kubectl apply -f k8s/monitoring/"]
+        S8["minikube service nginx --url"]
+    end
+
+    S1 --> S2 --> S3 --> S4 --> S5 --> S6 --> S7 --> S8
+
+    style Steps fill:#1a1a2e,stroke:#00d9ff,color:#00d9ff
+```
 
 ### Using manage.sh
 
@@ -46,31 +97,32 @@ kubectl apply -f k8s/monitoring/
 
 # Wait for pods
 kubectl get pods -w
-```
 
-### Accessing the App
-
-**On Linux/Mac:**
-```bash
+# Access the app
 minikube service nginx --url
-```
-
-**On Windows (Docker Desktop driver):**
-`minikube service` doesn't work with the Docker driver on Windows. Use port-forward instead:
-```bash
-kubectl port-forward svc/nginx 8081:80 --address 0.0.0.0
-# Then open http://localhost:8081
-```
-
-### Cleanup
-
-```bash
-./manage.sh k8s-down
 ```
 
 ---
 
 ## Directory Structure
+
+```mermaid
+flowchart TB
+    subgraph K8s["k8s/"]
+        D1["configmaps/\nconfig.yaml"]
+        D2["deployments/\ndeployments.yaml"]
+        D3["services/\nservices.yaml"]
+        D4["monitoring/\nprometheus-deployment.yaml\ngrafana-deployment.yaml\nloki-deployment.yaml\npromtail-daemonset.yaml"]
+        D5["argocd/\napplication.yaml"]
+    end
+
+    style K8s fill:#1a1a2e,stroke:#00d9ff,color:#00d9ff
+    style D1 fill:#16213e,stroke:#e94560,color:#e94560
+    style D2 fill:#16213e,stroke:#e94560,color:#e94560
+    style D3 fill:#16213e,stroke:#e94560,color:#e94560
+    style D4 fill:#0f3460,stroke:#00d9ff,color:#00d9ff
+    style D5 fill:#0f3460,stroke:#e94560,color:#e94560
+```
 
 ```
 k8s/
@@ -107,43 +159,43 @@ k8s/
 
 ## Configuration
 
+```mermaid
+flowchart TB
+    subgraph ConfigMap["📋 event-mgmt-config (ConfigMap)"]
+        C1["DB_HOST, DB_PORT, DB_NAME, DB_USER"]
+        C2["REDIS_HOST, REDIS_PORT"]
+        C3["RABBITMQ_HOST, RABBITMQ_PORT, RABBITMQ_USER"]
+        C4["EVENT_SERVICE_URL"]
+    end
+
+    subgraph Secret["🔐 event-mgmt-secrets (Secret)"]
+        S1["DB_PASSWORD"]
+        S2["REDIS_PASSWORD"]
+        S3["RABBITMQ_PASSWORD"]
+    end
+
+    subgraph Usage["📦 Used By"]
+        U1["All app Deployments: envFrom configMapRef + secretKeyRef"]
+    end
+
+    ConfigMap & Secret --> U1
+
+    style ConfigMap fill:#1a1a2e,stroke:#00d9ff,color:#00d9ff
+    style Secret fill:#0f3460,stroke:#e94560,color:#e94560
+    style Usage fill:#16213e,stroke:#e94560,color:#e94560
+```
+
 ### ConfigMap (`k8s/configmaps/config.yaml`)
 
 Name: `event-mgmt-config`
 
-Contains non-sensitive configuration:
-- `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`
-- `REDIS_HOST`, `REDIS_PORT`
-- `RABBITMQ_HOST`, `RABBITMQ_PORT`, `RABBITMQ_USER`
-- `EVENT_SERVICE_URL` — used by registration-service for HTTP calls
+Contains non-sensitive configuration.
 
 ### Secret (`k8s/configmaps/config.yaml`)
 
 Name: `event-mgmt-secrets`
 
-Contains sensitive credentials:
-- `DB_PASSWORD`
-- `REDIS_PASSWORD`
-- `RABBITMQ_PASSWORD`
-
-All app service Deployments reference the Secret via `secretKeyRef`:
-
-```yaml
-env:
-  - name: DB_PASSWORD
-    valueFrom:
-      secretKeyRef:
-        name: event-mgmt-secrets
-        key: DB_PASSWORD
-```
-
-App Deployments also use `envFrom` to load the entire ConfigMap:
-
-```yaml
-envFrom:
-  - configMapRef:
-      name: event-mgmt-config
-```
+Contains sensitive credentials.
 
 ---
 
@@ -207,24 +259,31 @@ Both use `ReadWriteOnce` access mode (single node).
 
 ## Monitoring Stack
 
-### Prometheus
+```mermaid
+flowchart TB
+    subgraph Prometheus["📊 Prometheus"]
+        P1["RBAC: ServiceAccount + ClusterRole"]
+        P2["ScrapeConfig: 8 targets"]
+        P3["NodePort: 9090"]
+    end
 
-- **RBAC:** ServiceAccount + ClusterRole + ClusterRoleBinding for Kubernetes API discovery
-- **ConfigMap:** Scrape configuration embedded in ConfigMap
-- **Targets:** 4 app services via Kubernetes service discovery
-- **NodePort:** 9090
+    subgraph Grafana["📈 Grafana"]
+        G1["Auto-provisioned datasources\n(Prometheus + Loki)"]
+        G2["Pre-configured dashboard\n(15 panels)"]
+        G3["NodePort: 30300"]
+    end
 
-### Grafana
+    subgraph Loki["📝 Loki + Promtail"]
+        L1["Loki: Log storage & query"]
+        L2["Promtail: DaemonSet (every node)"]
+    end
 
-- **Datasources:** Auto-provisioned via ConfigMap (Prometheus + Loki)
-- **Dashboard:** Pre-configured with the event management overview dashboard
-- **Credentials:** Admin password from Secret via `secretKeyRef`
-- **NodePort:** 30300
+    Prometheus & Grafana & Loki
 
-### Loki + Promtail
-
-- **Loki:** Log storage and query engine
-- **Promtail:** DaemonSet that collects logs from every node and ships to Loki
+    style Prometheus fill:#1a1a2e,stroke:#00d9ff,color:#00d9ff
+    style Grafana fill:#16213e,stroke:#e94560,color:#e94560
+    style Loki fill:#0f3460,stroke:#00d9ff,color:#00d9ff
+```
 
 ---
 
@@ -235,6 +294,22 @@ Services may CrashLoop on first start because they begin before Postgres/Redis a
 ---
 
 ## Useful Commands
+
+```mermaid
+flowchart TB
+    subgraph Commands["🔧 kubectl Commands"]
+        C1["kubectl get pods -o wide"]
+        C2["kubectl logs -f deployment/user-service"]
+        C3["kubectl describe deployment registration-service"]
+        C4["kubectl port-forward svc/nginx 8081:80 --address 0.0.0.0"]
+        C5["kubectl port-forward svc/prometheus 9090:9090 --address 0.0.0.0"]
+        C6["kubectl scale deployment user-service --replicas=3"]
+        C7["kubectl rollout restart deployment user-service"]
+        C8["./manage.sh k8s-down"]
+    end
+
+    style Commands fill:#1a1a2e,stroke:#00d9ff,color:#00d9ff
+```
 
 ```bash
 # Check pod status
@@ -248,6 +323,7 @@ kubectl describe deployment registration-service
 
 # Port-forward for local access (Windows/Docker Desktop)
 kubectl port-forward svc/nginx 8081:80 --address 0.0.0.0
+# Then open http://localhost:8081
 
 # Port-forward monitoring
 kubectl port-forward svc/prometheus 9090:9090 --address 0.0.0.0

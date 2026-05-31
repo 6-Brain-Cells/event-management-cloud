@@ -1,8 +1,39 @@
 # Event Service
 
+> Manages events: creation, retrieval, updates, cancellation, and capacity tracking with atomic increment/decrement operations.
+
+---
+
 ## Overview
 
-Manages events: creation, retrieval, updates, cancellation, and capacity tracking with atomic increment/decrement operations.
+```mermaid
+flowchart TB
+    subgraph External["📥 Requests via Nginx"]
+        CREATE["POST /events"]
+        LIST["GET /events"]
+        GET["GET /events/{id}"]
+        UPDATE["PUT /events/{id}"]
+        DELETE["DELETE /events/{id}"]
+        INCR["PATCH /events/{id}/increment-registration\n(X-Service-Key)"]
+        DECR["PATCH /events/{id}/decrement-registration\n(X-Service-Key)"]
+    end
+
+    subgraph Service["📅 Event Service (:8000 → :8002 dev)"]
+        PG["🐘 PostgreSQL\nevents table\n(version column)\nOptimistic locking"]
+        RD["📡 Redis\nCache events:list:*\n30s TTL\nWrite invalidation"]
+        MQ["🐰 RabbitMQ\nPublish: event.created"]
+        CB["🔄 Capacity Check\nAtomic SQL\nregistered_count < max_capacity"]
+    end
+
+    CREATE & UPDATE & DELETE --> PG
+    LIST & GET --> RD
+    RD -.cache.-> PG
+    CREATE -.publish.-> MQ
+    INCR & DECR --> CB
+
+    style Service fill:#16213e,stroke:#e94560,color:#e94560
+    style External fill:#1a1a2e,stroke:#00d9ff,color:#00d9ff
+```
 
 | Property | Value |
 |----------|-------|
@@ -13,6 +44,49 @@ Manages events: creation, retrieval, updates, cancellation, and capacity trackin
 | **Dockerfile** | Multi-stage `python:3.11-slim` |
 | **Auth** | JWT + X-Service-Key for inter-service calls |
 | **Concurrency** | Optimistic locking via `version` column (PUT/DELETE return 409 on conflict) |
+
+---
+
+## Architecture
+
+### Event CRUD with Optimistic Locking
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant NG as Nginx
+    participant ES as Event Service
+    participant PG as PostgreSQL
+    participant RD as Redis
+    participant MQ as RabbitMQ
+
+    Note over C,ES: Update Event (Optimistic Concurrency)
+    C->>+NG: PUT /api/events/1 {title: "New Title", version: 3}
+    NG->>+ES: PUT /events/1 {title: "New Title", version: 3}
+    ES->>+PG: UPDATE events SET title=?, version=version+1<br/>WHERE id=1 AND version=3
+    alt Version matches
+        PG-->-ES: 1 row updated
+        ES->>RD: DELETE events:list:*
+        ES-->-NG: 200 {event}
+        NG-->-C: 200 OK
+    else Version mismatch
+        PG-->-ES: 0 rows updated
+        ES-->-NG: 409 Conflict {current_version: 5, provided_version: 3}
+        NG-->-C: 409 Conflict
+    end
+
+    Note over ES,PG: Capacity Increment (Atomic)
+    participant RS as Registration Service
+    RS->>+ES: PATCH /events/1/increment-registration (X-Service-Key)
+    ES->>+PG: UPDATE events SET registered_count=registered_count+1<br/>WHERE id=1 AND registered_count < max_capacity<br/>RETURNING id, registered_count, max_capacity
+    alt Event has capacity
+        PG-->-ES: {id: 1, registered_count: 101, max_capacity: 200}
+        ES-->-RS: 200 {registered_count: 101}
+    else Event full
+        PG-->-ES: 0 rows updated
+        ES-->-RS: 409 Event is full
+    end
+```
 
 ---
 
@@ -53,6 +127,28 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE INDEX IF NOT EXISTS idx_events_status_type ON events(status, event_type);
 CREATE INDEX IF NOT EXISTS idx_events_start_date ON events(start_date);
 CREATE INDEX IF NOT EXISTS idx_events_organizer ON events(organizer_id);
+```
+
+### Schema Diagram
+
+```mermaid
+erDiagram
+    events {
+        int id PK
+        varchar title NN
+        text description
+        varchar event_type NN
+        timestamp start_date NN
+        timestamp end_date NN
+        varchar location
+        int max_capacity NN
+        int registered_count
+        int organizer_id NN FK
+        decimal ticket_price
+        varchar status
+        int version NN
+        timestamp created_at
+    }
 ```
 
 ---
@@ -233,27 +329,57 @@ Cancel event (sets `status='cancelled'`). Organizers can only cancel their own e
 
 ## Capacity Management
 
-The increment/decrement endpoints are atomic SQL operations:
+```mermaid
+flowchart TB
+    subgraph Increment["📈 Increment (Reserve Spot)"]
+        I1["UPDATE events SET\nregistered_count = registered_count + 1\nWHERE id=? AND registered_count < max_capacity"]
+        I2["RETURNING id, registered_count, max_capacity"]
+    end
 
-```sql
--- Increment (fails if full)
-UPDATE events SET registered_count = registered_count + 1
-WHERE id=%s AND registered_count < max_capacity
-RETURNING id, registered_count, max_capacity;
+    subgraph Decrement["📉 Decrement (Compensating Txn)"]
+        D1["UPDATE events SET\nregistered_count = GREATEST(registered_count - 1, 0)\nWHERE id=?"]
+        D2["RETURNING id, registered_count, max_capacity"]
+    end
 
--- Decrement (compensating transaction)
-UPDATE events SET registered_count = GREATEST(registered_count - 1, 0)
-WHERE id=%s
-RETURNING id, registered_count, max_capacity;
+    subgraph Result["Result"]
+        OK["✅ Success: proceed with registration"]
+        FAIL["❌ Failure: return 409 to client"]
+        COMP["↩️ Compensating: restore capacity"]
+    end
+
+    I1 --> I2 --> OK & FAIL
+    D1 --> I2 --> COMP
+
+    style Increment fill:#16213e,stroke:#e94560,color:#e94560
+    style Decrement fill:#0f3460,stroke:#00d9ff,color:#00d9ff
+    style Result fill:#1a1a2e,stroke:#00d9ff,color:#00d9ff
 ```
 
-This prevents race conditions where multiple users register simultaneously.
+The increment/decrement endpoints are atomic SQL operations that prevent race conditions where multiple users register simultaneously.
 
 ---
 
 ## Optimistic Concurrency Control
 
-The events table uses a `version` column to prevent lost updates when multiple clients modify the same event simultaneously.
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant ES as Event Service
+    participant PG as PostgreSQL
+
+    Note over C: Client wants to update event v1 → v2
+    C->>+ES: PUT /events/1 {version: 1, ...}
+    ES->>+PG: UPDATE events SET ... version=version+1<br/>WHERE id=1 AND version=1
+    PG-->-ES: 1 row updated, returns new row (version=2)
+    ES-->-C: 200 OK {event with version=2}
+
+    Note over C: Another client with stale version
+    C2->>+ES: PUT /events/1 {version: 1, ...}
+    ES->>+PG: UPDATE events SET ... version=version+1<br/>WHERE id=1 AND version=1
+    PG-->-ES: 0 rows (version already 2)
+    ES-->-C2: 409 Conflict {current_version: 2, provided_version: 1}
+    C2->>C2: Fetch latest, retry with version=2
+```
 
 **Mechanism:**
 - Every row starts with `version = 1`
@@ -261,14 +387,69 @@ The events table uses a `version` column to prevent lost updates when multiple c
 - The SQL `WHERE` clause includes `AND version = %s`; the update also sets `version = version + 1`
 - If the `WHERE` clause matches zero rows, the service returns `409 Conflict`
 
-**SQL Pattern:**
-```sql
-UPDATE events SET title = %s, ..., version = version + 1
-WHERE id = %s AND version = %s
-RETURNING *;
+---
+
+## Redis Caching
+
+```mermaid
+flowchart TB
+    subgraph Request["📥 GET /events Request"]
+        R1["Build cache key:\nevents:list:{status}:{type}:{page}:{size}"]
+        R2["Check Redis for cached response"]
+    end
+
+    subgraph CacheHit["✅ Cache Hit"]
+        C1["Return cached JSON directly"]
+        C2["No DB query needed"]
+    end
+
+    subgraph CacheMiss["❌ Cache Miss"]
+        M1["Query PostgreSQL with filters"]
+        M2["Store result in Redis with 30s TTL"]
+        M3["Return response"]
+    end
+
+    subgraph Invalidation["🗑️ Write Operations"]
+        W1["POST /events, PUT /events/{id}, DELETE /events/{id}"]
+        W2["DELETE all events:list:* keys"]
+        W3["Next list request repopulates cache"]
+    end
+
+    R1 --> R2 --> CacheHit & CacheMiss
+    W1 --> W2 --> W3
+
+    style Request fill:#1a1a2e,stroke:#00d9ff,color:#00d9ff
+    style CacheHit fill:#0f3460,stroke:#00d9ff,color:#00d9ff
+    style CacheMiss fill:#16213e,stroke:#e94560,color:#e94560
+    style Invalidation fill:#16213e,stroke:#e94560,color:#e94560
 ```
 
-**Client Workflow:** Fetch event → note `version` → send update with `version` → if 409, re-fetch and retry.
+**Cache Key Format:** `events:list:{status}:{event_type}:{page}:{page_size}`
+
+**Examples:**
+- `events:list:active:conference:1:20` — Active conferences, page 1
+- `events:list:all::1:10` — All events (super_admin), page 1
+
+**Behavior:**
+- On `GET /events`, the service builds the cache key from query parameters
+- If the key exists in Redis, the cached JSON is returned immediately
+- If the key is missing, the service queries PostgreSQL and stores the result with TTL
+- On `POST /events`, `PUT /events/{id}`, or `DELETE /events/{id}`, all `events:list:*` keys are invalidated
+- If Redis is unavailable, the endpoint queries PostgreSQL directly (graceful degradation)
+
+---
+
+## Connection Pool Configuration
+
+The event service uses configurable connection pool settings via environment variables:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `DB_POOL_MIN` | `2` | Minimum connections kept open |
+| `DB_POOL_MAX` | `10` | Maximum connections allowed |
+| `DB_CONNECT_TIMEOUT` | `5` | Connection timeout in seconds |
+
+All pool connections use `statement_timeout=5000ms` to prevent long-running queries from blocking the pool.
 
 ---
 
@@ -285,35 +466,6 @@ The event service uses **Alembic** for database schema migrations. On startup, t
 ### Version Table
 
 Alembic tracks applied migrations in `alembic_version_event` (not the default `alembic_version`) to avoid conflicts with other services sharing the same PostgreSQL database.
-
----
-
-## Redis Caching
-
-The event service caches `GET /events` responses in Redis to reduce database load.
-
-**Cache Key Format:** `events:list:{status}:{event_type}:{page}:{page_size}`
-
-**Behavior:**
-- On a list request, the service checks Redis for a cached response matching the filter combination
-- If cached, the response is returned directly without querying PostgreSQL
-- If not cached, the DB is queried and the result is stored in Redis with a 30-second TTL
-- Cache is invalidated (deleted) on any write operation: `POST /events`, `PUT /events/{id}`, `DELETE /events/{id}`
-- If Redis is unavailable, the endpoint falls back to a direct database query
-
----
-
-## Connection Pool Configuration
-
-The event service uses configurable connection pool settings via environment variables:
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `DB_POOL_MIN` | `2` | Minimum connections kept open |
-| `DB_POOL_MAX` | `10` | Maximum connections allowed |
-| `DB_CONNECT_TIMEOUT` | `5` | Connection timeout in seconds |
-
-All pool connections use `statement_timeout=5000ms` to prevent long-running queries from blocking the pool.
 
 ---
 

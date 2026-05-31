@@ -1,8 +1,47 @@
-# Database
+# Database (PostgreSQL)
 
 ## Overview
 
 All services share a single PostgreSQL 16 instance but each owns its own tables. Connection pooling is managed per-service using `psycopg2.pool.ThreadedConnectionPool`.
+
+```mermaid
+flowchart TB
+    subgraph Services["⚙️ Services"]
+        US["👤 user-service"]
+        ES["📅 event-service"]
+        RS["🎫 registration-service"]
+        NS["🔔 notification-service"]
+    end
+
+    subgraph PG["🐘 PostgreSQL :5432"]
+        DB1["eventdb\n(dev)"]
+        DB2["testdb\n(test)"]
+        DB3["eventdb_prod\n(prod)"]
+
+        subgraph Tables["📋 Tables (one service each)"]
+            T1["users\n(user-service)"]
+            T2["events\n(event-service)"]
+            T3["registrations\n(registration-service)"]
+            T4["notifications\n(notification-service)"]
+        end
+
+        subgraph Migrations["🔄 Alembic Version Tables"]
+            V1["alembic_version_user"]
+            V2["alembic_version_event"]
+            V3["alembic_version_registration"]
+            V4["alembic_version_notification"]
+        end
+    end
+
+    Services --> Tables
+    US --> V1
+    ES --> V2
+    RS --> V3
+    NS --> V4
+
+    style PG fill:#16213e,stroke:#e94560,color:#e94560
+    style Services fill:#1a1a2e,stroke:#00d9ff,color:#00d9ff
+```
 
 ---
 
@@ -103,6 +142,28 @@ All indexes are created via `CREATE INDEX IF NOT EXISTS` in each service's start
 
 All 4 services use **Alembic** for version-controlled database schema migrations. Each service has its own Alembic configuration to prevent migration conflicts in the shared PostgreSQL database.
 
+```mermaid
+flowchart TB
+    subgraph Alembic["🔄 Alembic Migration System"]
+        A1["alembic.ini\n(service-specific)"]
+        A2["env.py\n(version_table override)"]
+        A3["versions/\n001_*.py files"]
+    end
+
+    subgraph VersionTables["📋 Version Tables (isolated)"]
+        V1["alembic_version_user"]
+        V2["alembic_version_event"]
+        V3["alembic_version_registration"]
+        V4["alembic_version_notification"]
+    end
+
+    A1 --> A2 --> A3
+    A3 --> V1 & V2 & V3 & V4
+
+    style Alembic fill:#1a1a2e,stroke:#00d9ff,color:#00d9ff
+    style VersionTables fill:#16213e,stroke:#e94560,color:#e94560
+```
+
 ### Per-Service Configuration
 
 | Service | alembic.ini | Version Table | Initial Migration |
@@ -126,6 +187,19 @@ context.configure(
 
 ### Startup Behavior
 
+```mermaid
+flowchart TB
+    S["Service Startup"] --> A["Run alembic upgrade head"]
+    A --> SUC{"Alembic\nsucceeds?"}
+    SUC -->|"Yes"| DONE["✅ Schema up to date"]
+    SUC -->|"No (Alembic unavailable)"| FALL["Execute CREATE TABLE IF NOT EXISTS\nfor each table + index"]
+    FALL --> DONE
+
+    style S fill:#1a1a2e,stroke:#00d9ff,color:#00d9ff
+    style DONE fill:#0f3460,stroke:#00d9ff,color:#00d9ff
+    style FALL fill:#16213e,stroke:#e94560,color:#e94560
+```
+
 Each service's `startup()` function attempts `alembic upgrade head` first, falling back to `CREATE TABLE IF NOT EXISTS` if Alembic is unavailable.
 
 ---
@@ -135,6 +209,28 @@ Each service's `startup()` function attempts `alembic upgrade head` first, falli
 The `events` table includes a `version` column (`INT NOT NULL DEFAULT 1`) that enables optimistic concurrency control.
 
 ### Mechanism
+
+```mermaid
+sequenceDiagram
+    participant C as Client A
+    participant C2 as Client B
+    participant PG as PostgreSQL
+
+    Note over C,C2: Both clients read event v1
+    C->>+PG: SELECT * FROM events WHERE id=1
+    PG-->-C: {version: 1, title: "Old Title"}
+    C2->>+PG: SELECT * FROM events WHERE id=1
+    PG-->-C2: {version: 1, title: "Old Title"}
+
+    Note over C: Client A updates first (wins)
+    C->>+PG: UPDATE events SET title='New Title', version=version+1<br/>WHERE id=1 AND version=1
+    PG-->-C: 1 row updated (now version=2)
+
+    Note over C2: Client B updates with stale version (loses)
+    C2->>+PG: UPDATE events SET title='Another Title', version=version+1<br/>WHERE id=1 AND version=1
+    PG-->-C2: 0 rows updated (version is 2, not 1)
+    C2-->-C2: 409 Conflict — fetch latest and retry
+```
 
 1. Every event row starts with `version = 1`
 2. `PUT /events/{id}` requires `version` in the request body
@@ -156,6 +252,29 @@ The `events` table includes a `version` column (`INT NOT NULL DEFAULT 1`) that e
 
 ## Connection Pooling
 
+```mermaid
+flowchart TB
+    subgraph App["Application Service"]
+        H1["HTTP Request #1"]
+        H2["HTTP Request #2"]
+        H3["HTTP Request #3"]
+        POOL["ThreadedConnectionPool\n(min=2, max=10)"]
+    end
+
+    subgraph PG["🐘 PostgreSQL"]
+        CON1["Connection 1"]
+        CON2["Connection 2"]
+        CON3["Connection 3"]
+        CON10["Connection 10"]
+    end
+
+    H1 & H2 & H3 --> POOL
+    POOL --> CON1 & CON2 & CON3 & CON10
+
+    style POOL fill:#16213e,stroke:#e94560,color:#e94560
+    style App fill:#1a1a2e,stroke:#00d9ff,color:#00d9ff
+```
+
 Each service creates a `ThreadedConnectionPool` with the following configuration:
 
 ```python
@@ -176,7 +295,7 @@ psycopg2.pool.ThreadedConnectionPool(
 
 ## Connection Pool Tuning
 
-All 4 services now support configurable pool sizes and timeouts via environment variables:
+All 4 services support configurable pool sizes and timeouts via environment variables:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
@@ -245,6 +364,37 @@ postgres:
 ---
 
 ## Kubernetes
+
+```mermaid
+flowchart TB
+    subgraph K8s["☸️ Kubernetes"]
+        subgraph Deploy["📦 Deployments"]
+            D1["postgres Deployment\n(replicas: 1)"]
+        end
+
+        subgraph Storage["💾 Persistent Storage"]
+            PVC["postgres-pvc\n(1Gi, ReadWriteOnce)"]
+        end
+
+        subgraph Svc["🔌 Services"]
+            SVC["postgres-service\n(ClusterIP :5432)"]
+        end
+
+        subgraph Sec["🔐 Secrets"]
+            SEC["event-mgmt-secrets\n(DB_PASSWORD via secretKeyRef)"]
+        end
+
+        D1 --> PVC
+        D1 --> SVC
+        D1 -.envFrom.-> SEC
+    end
+
+    style K8s fill:#1a1a2e,stroke:#00d9ff,color:#00d9ff
+    style Deploy fill:#16213e,stroke:#e94560,color:#e94560
+    style Storage fill:#0f3460,stroke:#00d9ff,color:#00d9ff
+    style Svc fill:#16213e,stroke:#e94560,color:#e94560
+    style Sec fill:#0f3460,stroke:#e94560,color:#e94560
+```
 
 - **Deployment:** postgres container with resource limits
 - **PVC:** `postgres-pvc` (1Gi storage)

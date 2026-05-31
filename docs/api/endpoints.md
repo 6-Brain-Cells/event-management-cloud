@@ -1,14 +1,47 @@
 # API Reference — Complete Endpoint Documentation
 
-All endpoints are accessed through the nginx gateway at `http://localhost:8080/api/`.
+> All endpoints are accessed through the nginx gateway at `http://localhost:8080/api/`.
+
+---
+
+## Table of Contents
+
+- [Authentication](#authentication)
+- [User Service](#user-service)
+- [Event Service](#event-service)
+- [Registration Service](#registration-service)
+- [Notification Service](#notification-service)
+- [Health & Metrics](#health--metrics)
+
+---
 
 ## Authentication
 
-All endpoints (except register, login, and health) require a JWT Bearer token in the `Authorization` header:
+```mermaid
+flowchart LR
+    subgraph Token["🔐 JWT Bearer Token"]
+        T1["Authorization: Bearer eyJ..."]
+    end
 
+    subgraph Roles["📋 RBAC Roles"]
+        R1["super_admin: Full access"]
+        R2["organizer: Own events"]
+        R3["attendee: Own data"]
+    end
+
+    subgraph Internal["🔑 Service-to-Service"]
+        S["X-Service-Key header\nregistration → event-service"]
+    end
+
+    T1 --> R1 & R2 & R3
+    S --> T1
+
+    style Token fill:#1a1a2e,stroke:#00d9ff,color:#00d9ff
+    style Roles fill:#16213e,stroke:#e94560,color:#e94560
+    style Internal fill:#0f3460,stroke:#00d9ff,color:#00d9ff
 ```
-Authorization: Bearer eyJhbGciOiJIUzI1NiIs...
-```
+
+All endpoints (except register, login, and health) require a JWT Bearer token in the `Authorization` header.
 
 ### Roles
 
@@ -26,38 +59,17 @@ Internal service calls (e.g., registration-service → event-service) use the `X
 
 ## User Service
 
-### `POST /api/users/register`
-
-Register a new user account.
-
-```bash
-curl -X POST http://localhost:8080/api/users/register \
-  -H "Content-Type: application/json" \
-  -d '{
-    "username": "alice",
-    "email": "alice@test.com",
-    "password": "Password123",
-    "full_name": "Alice Smith",
-    "role": "organizer"
-  }'
-```
+### `POST /api/users/register` — Register
 
 **Request Body:**
 
 | Field | Type | Required | Constraints |
 |-------|------|----------|-------------|
-| username | string | yes | Unique, max 50 chars |
-| email | string | yes | Unique, valid email, max 100 chars |
-| password | string | yes | Hashed with bcrypt (12 rounds) |
-| full_name | string | yes | Max 100 chars |
-| role | string | no | attendee | super_admin, organizer, attendee |
-
-**Input Validation:**
-- `username`: 3-50 characters, alphanumeric and underscores only
-- `email`: Valid email format, auto-lowercased
-- `password`: 8-128 characters
-- `full_name`: 1-100 characters
-- `role`: Must be one of `super_admin`, `organizer`, `attendee` (default: `attendee`)
+| username | string | yes | Unique, 3-50 chars, alphanumeric + underscore |
+| email | string | yes | Unique, valid email format |
+| password | string | yes | 8-128 chars |
+| full_name | string | yes | 1-100 chars |
+| role | string | no | `super_admin`, `organizer`, `attendee` (default) |
 
 **Response (201):**
 ```json
@@ -78,7 +90,7 @@ curl -X POST http://localhost:8080/api/users/register \
 | Status | Detail |
 |--------|--------|
 | 400 | Username or email already exists |
-| 422 | Validation error (invalid username/email/password/role format) |
+| 422 | Validation error (invalid format) |
 
 **Side Effects:**
 - Publishes `user.registered` to RabbitMQ → notification-service creates welcome notification
@@ -86,15 +98,7 @@ curl -X POST http://localhost:8080/api/users/register \
 
 ---
 
-### `POST /api/users/login`
-
-Authenticate user and receive token.
-
-```bash
-curl -X POST http://localhost:8080/api/users/login \
-  -H "Content-Type: application/json" \
-  -d '{"email": "alice@test.com", "password": "Password123"}'
-```
+### `POST /api/users/login` — Login
 
 **Response (200):**
 ```json
@@ -115,22 +119,15 @@ curl -X POST http://localhost:8080/api/users/login \
 | 401 | Invalid credentials |
 
 **Notes:**
-- Returns a JWT token (HS256, 24h expiry) with user_id, username, email, and role claims
+- JWT token (HS256, 24h expiry) with user_id, username, email, and role claims
 - Session stored in Redis with 24h TTL (`session:<jwt>`)
-- Password verified using bcrypt
+- Password verified using bcrypt (12 rounds)
 
 ---
 
-### `GET /api/users`
-
-List all active users.
+### `GET /api/users` — List Users
 
 **Auth:** Any authenticated user
-
-```bash
-curl http://localhost:8080/api/users \
-  -H "Authorization: Bearer $TOKEN"
-```
 
 **Response (200):**
 ```json
@@ -144,14 +141,7 @@ curl http://localhost:8080/api/users \
 
 ---
 
-### `GET /api/users/me`
-
-Get the current authenticated user's profile.
-
-```bash
-curl http://localhost:8080/api/users/me \
-  -H "Authorization: Bearer $TOKEN"
-```
+### `GET /api/users/me` — Current User
 
 **Auth:** Any authenticated user
 
@@ -169,74 +159,45 @@ curl http://localhost:8080/api/users/me \
 
 ---
 
-### `GET /api/users/{user_id}`
-
-Get user by ID.
+### `GET /api/users/{user_id}` — Get User
 
 **Auth:** Any authenticated user
-
-```bash
-curl http://localhost:8080/api/users/1 \
-  -H "Authorization: Bearer $TOKEN"
-```
 
 **Errors:**
 | Status | Detail |
 |--------|--------|
-| 404 | User not found |
+| 404 | User not found or deactivated |
 
 ---
 
-### `PUT /api/users/{user_id}/role`
-
-Update a user's role.
-
-```bash
-curl -X PUT http://localhost:8080/api/users/2/role \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"role": "organizer"}'
-```
+### `PUT /api/users/{user_id}/role` — Update Role
 
 **Auth:** super_admin only
 
 **Request Body:**
-
-| Field | Type | Required | Values |
-|-------|------|----------|--------|
-| role | string | yes | `super_admin`, `organizer`, `attendee` |
+```json
+{"role": "organizer"}
+```
 
 **Response (200):**
 ```json
 {
   "message": "Role updated",
-  "user": {
-    "id": 2,
-    "username": "bob",
-    "email": "bob@test.com",
-    "role": "organizer"
-  }
+  "user": {"id": 2, "username": "bob", "email": "bob@test.com", "role": "organizer"}
 }
 ```
 
 **Errors:**
 | Status | Detail |
 |--------|--------|
-| 403 | Insufficient permissions (not super_admin) |
+| 403 | Not a super_admin |
 | 404 | User not found |
 
 ---
 
-### `DELETE /api/users/{user_id}`
-
-Soft-delete a user (deactivate).
+### `DELETE /api/users/{user_id}` — Soft Delete
 
 **Auth:** Self-deletion or super_admin
-
-```bash
-curl -X DELETE http://localhost:8080/api/users/1 \
-  -H "Authorization: Bearer $TOKEN"
-```
 
 **Response (200):** `{"message": "User deactivated"}`
 
@@ -250,28 +211,9 @@ curl -X DELETE http://localhost:8080/api/users/1 \
 
 ## Event Service
 
-### `POST /api/events`
-
-Create a new event.
+### `POST /api/events` — Create Event
 
 **Auth:** organizer or super_admin
-
-```bash
-curl -X POST http://localhost:8080/api/events \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "title": "Tech Summit",
-    "description": "Annual tech conference",
-    "event_type": "conference",
-    "start_date": "2026-07-01 09:00:00",
-    "end_date": "2026-07-03 18:00:00",
-    "location": "Convention Center",
-    "max_capacity": 200,
-    "organizer_id": 1,
-    "ticket_price": 49.99
-  }'
-```
 
 **Request Body:**
 
@@ -284,7 +226,7 @@ curl -X POST http://localhost:8080/api/events \
 | end_date | string (ISO) | yes | — |
 | location | string | yes | — |
 | max_capacity | int | yes | 100 |
-| organizer_id | int | no | Auto-set from JWT for organizer; optional for super_admin |
+| organizer_id | int | no | Auto from JWT |
 | ticket_price | float | no | 0.0 |
 
 **Response (200):**
@@ -298,36 +240,28 @@ curl -X POST http://localhost:8080/api/events \
 }
 ```
 
+**Errors:**
+| Status | Detail |
+|--------|--------|
+| 400 | end_date must be after start_date |
+| 403 | Insufficient permissions (attendee cannot create events) |
+
 **Side Effects:**
 - Publishes `event.created` to RabbitMQ
 - Publishes to Redis channel `event_events`
 
-**Errors:**
-| Status | Detail |
-|--------|--------|
-| 403 | Insufficient permissions (attendee cannot create events) |
-
 ---
 
-### `GET /api/events`
-
-List events with optional filters and pagination. Results are cached in Redis (30s TTL).
+### `GET /api/events` — List Events
 
 **Auth:** Any authenticated user (service key also accepted)
-
-```bash
-curl http://localhost:8080/api/events \
-  -H "Authorization: Bearer $TOKEN"
-curl "http://localhost:8080/api/events?event_type=conference&status=active&page=1&page_size=20" \
-  -H "Authorization: Bearer $TOKEN"
-```
 
 **Query Parameters:**
 
 | Param | Type | Default | Description |
 |-------|------|---------|-------------|
 | event_type | string | — | Filter by type |
-| status | string | `active` | Filter by status (`super_admin` can use `all` to see cancelled events) |
+| status | string | `active` | Filter by status (super_admin can use `all`) |
 | page | int | `1` | Page number (1-indexed) |
 | page_size | int | `20` | Items per page (max 100) |
 
@@ -342,24 +276,17 @@ curl "http://localhost:8080/api/events?event_type=conference&status=active&page=
 }
 ```
 
+**Caching:** Results cached in Redis (30s TTL). Cache invalidated on writes.
+
 ---
 
-### `GET /api/events/{event_id}`
-
-Get event by ID.
+### `GET /api/events/{event_id}` — Get Event
 
 **Auth:** Any authenticated user
 
-```bash
-curl http://localhost:8080/api/events/1 \
-  -H "Authorization: Bearer $TOKEN"
-```
-
 ---
 
-### `PUT /api/events/{event_id}`
-
-Update event fields. Requires optimistic concurrency via `version` field.
+### `PUT /api/events/{event_id}` — Update Event
 
 **Auth:** organizer (own events only) or super_admin
 
@@ -372,26 +299,17 @@ Update event fields. Requires optimistic concurrency via `version` field.
 | location | string | no | New location |
 | max_capacity | int | no | New capacity |
 | ticket_price | float | no | New price |
-| version | int | **yes** | Current version of the event (for optimistic concurrency) |
-
-```bash
-curl -X PUT http://localhost:8080/api/events/1 \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"title": "Updated Title", "max_capacity": 300, "version": 1}'
-```
+| **version** | int | **yes** | Current version for optimistic concurrency |
 
 **Errors:**
 | Status | Detail |
 |--------|--------|
-| 403 | Insufficient permissions (not the event owner or super_admin) |
-| 409 | Optimistic concurrency conflict (version mismatch). Returns `{"message": "...", "current_version": N, "provided_version": M}` |
+| 403 | Not the event owner or super_admin |
+| 409 | Version mismatch (event was modified). Returns `{current_version, provided_version}` |
 
 ---
 
-### `DELETE /api/events/{event_id}`
-
-Cancel an event. Requires optimistic concurrency via `version` query parameter.
+### `DELETE /api/events/{event_id}` — Cancel Event
 
 **Auth:** organizer (own events only) or super_admin
 
@@ -399,35 +317,21 @@ Cancel an event. Requires optimistic concurrency via `version` query parameter.
 
 | Param | Type | Required | Description |
 |-------|------|----------|-------------|
-| version | int | **yes** | Current version of the event (for optimistic concurrency) |
-
-```bash
-curl -X DELETE "http://localhost:8080/api/events/1?version=2" \
-  -H "Authorization: Bearer $TOKEN"
-```
+| **version** | int | **yes** | Current version for optimistic locking |
 
 **Errors:**
 | Status | Detail |
 |--------|--------|
-| 403 | Insufficient permissions (not the event owner or super_admin) |
-| 409 | Optimistic concurrency conflict (version mismatch). Returns `{"message": "...", "current_version": N, "provided_version": M}` |
+| 403 | Not the event owner or super_admin |
+| 409 | Version mismatch |
 
 ---
 
 ## Registration Service
 
-### `POST /api/registrations`
+### `POST /api/registrations` — Register for Event
 
-Register for an event with payment processing.
-
-**Auth:** attendee, organizer, or super_admin. user_id is derived from the JWT token.
-
-```bash
-curl -X POST http://localhost:8080/api/registrations \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"event_id": 1, "payment_method": "card"}'
-```
+**Auth:** attendee, organizer, or super_admin. user_id derived from JWT token.
 
 **Request Body:**
 
@@ -462,31 +366,42 @@ curl -X POST http://localhost:8080/api/registrations \
 | 404 | Event not found |
 | 409 | Event is full / User already registered |
 | 402 | Payment failed |
-| 503 | Event service unavailable |
+| 503 | Event service unavailable (circuit breaker open) |
 
 **Registration Flow:**
-1. `GET /events/{id}` — Verify event exists (via `X-Service-Key`)
-2. `PATCH /events/{id}/increment-registration` — Atomically reserve a spot
-3. `process_payment_mock()` — Process payment
-4. If payment fails → `PATCH /events/{id}/decrement-registration` (compensating transaction)
-5. If payment succeeds → `INSERT INTO registrations`
-6. Generate ticket number (`TKT-{id:04d}-{random}`)
-7. Publish `registration.confirmed` to RabbitMQ
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant REG as Registration Service
+    participant EVT as Event Service
+    participant MQ as RabbitMQ
+
+    C->>+REG: POST /registrations {event_id, payment_method}
+    REG->>+EVT: GET /events/{id} (X-Service-Key)
+    EVT-->-REG: event data
+    REG->>+EVT: PATCH /events/{id}/increment-registration (X-Service-Key)
+    alt Event full
+        EVT-->-REG: 409
+        REG-->-C: 409 Event is full
+    end
+    EVT-->-REG: {registered_count: 101, max_capacity: 200}
+
+    REG->>REG: process_payment_mock()
+    alt Payment success
+        REG->>REG: INSERT registration
+        REG->>MQ: Publish registration.confirmed
+        REG-->-C: 200 OK {ticket_number}
+    else Payment failed
+        REG->>EVT: PATCH /events/{id}/decrement-registration (X-Service-Key)
+        REG-->-C: 402 Payment Failed
+    end
+```
 
 ---
 
-### `GET /api/registrations`
-
-List registrations with pagination.
+### `GET /api/registrations` — List Registrations
 
 **Auth:** Any user (scoped to own; super_admin sees all)
-
-```bash
-curl http://localhost:8080/api/registrations \
-  -H "Authorization: Bearer $TOKEN"
-curl "http://localhost:8080/api/registrations?page=2&page_size=10" \
-  -H "Authorization: Bearer $TOKEN"
-```
 
 **Query Parameters:**
 
@@ -508,50 +423,25 @@ curl "http://localhost:8080/api/registrations?page=2&page_size=10" \
 
 ---
 
-### `GET /api/registrations/{id}`
-
-Get registration by ID.
+### `GET /api/registrations/{id}` — Get Registration
 
 **Auth:** Own user or super_admin
 
-**Errors:**
-| Status | Detail |
-|--------|--------|
-| 403 | Insufficient permissions (not the registration owner or super_admin) |
-
 ---
 
-### `GET /api/registrations/user/{user_id}`
-
-List registrations for a user.
+### `GET /api/registrations/user/{user_id}` — User's Registrations
 
 **Auth:** Own user or super_admin
 
-```bash
-curl http://localhost:8080/api/registrations/user/1 \
-  -H "Authorization: Bearer $TOKEN"
-```
+---
 
-**Errors:**
-| Status | Detail |
-|--------|--------|
-| 403 | Insufficient permissions (not the user or super_admin) |
+### `GET /api/registrations/event/{event_id}` — Event Attendees
+
+**Auth:** Any authenticated user
 
 ---
 
-### `GET /api/registrations/event/{event_id}`
-
-List confirmed registrations for an event.
-
-```bash
-curl http://localhost:8080/api/registrations/event/1
-```
-
----
-
-### `PATCH /api/registrations/{id}/payment`
-
-Update payment status.
+### `PATCH /api/registrations/{id}/payment` — Update Payment
 
 **Auth:** super_admin only
 
@@ -561,27 +451,11 @@ curl -X PATCH http://localhost:8080/api/registrations/5/payment \
   -d '{"payment_status": "paid"}'
 ```
 
-**Response (200):**
-```json
-{
-  "message": "Payment status updated",
-  "registration": {"id": 5, "payment_status": "paid"}
-}
-```
-
 ---
 
-### `POST /api/registrations/{id}/process-payment`
-
-Retry payment processing for an existing registration.
+### `POST /api/registrations/{id}/process-payment` — Retry Payment
 
 **Auth:** Own user or super_admin
-
-```bash
-curl -X POST http://localhost:8080/api/registrations/5/process-payment \
-  -H "Content-Type: application/json" \
-  -d '{"payment_method": "card", "amount": 49.99, "force_decline": false}'
-```
 
 **Request Body:**
 
@@ -591,33 +465,11 @@ curl -X POST http://localhost:8080/api/registrations/5/process-payment \
 | amount | float | yes | Payment amount |
 | force_decline | boolean | no | Force payment decline for testing (default: false) |
 
-**Response (200):**
-```json
-{
-  "message": "Payment processed",
-  "payment": {
-    "id": 5,
-    "payment_method": "card",
-    "payment_status": "paid",
-    "payment_reference": "TXN-A1B2C3D4E5F6G7H8",
-    "payment_gateway": "simulated-card",
-    "payment_processed_at": "2026-05-10 19:30:00.123456"
-  }
-}
-```
-
 ---
 
-### `DELETE /api/registrations/{id}`
-
-Cancel a registration (restores event capacity).
+### `DELETE /api/registrations/{id}` — Cancel Registration
 
 **Auth:** Own user or super_admin
-
-```bash
-curl -X DELETE http://localhost:8080/api/registrations/5 \
-  -H "Authorization: Bearer $TOKEN"
-```
 
 **Response (200):** `{"message": "Registration cancelled"}`
 
@@ -629,27 +481,15 @@ curl -X DELETE http://localhost:8080/api/registrations/5 \
 
 ## Notification Service
 
-### `GET /api/notifications/user/{user_id}`
-
-List notifications for a user.
+### `GET /api/notifications/user/{user_id}` — User Notifications
 
 **Auth:** Own user or super_admin
-
-```bash
-curl http://localhost:8080/api/notifications/user/1 \
-  -H "Authorization: Bearer $TOKEN"
-```
 
 **Query Parameters:**
 
 | Param | Type | Default | Description |
 |-------|------|---------|-------------|
 | unread_only | boolean | false | Only return unread notifications |
-
-**Errors:**
-| Status | Detail |
-|--------|--------|
-| 403 | Insufficient permissions (not the user or super_admin) |
 
 **Response (200):**
 ```json
@@ -671,9 +511,7 @@ curl http://localhost:8080/api/notifications/user/1 \
 
 ---
 
-### `POST /api/notifications`
-
-Create a single notification.
+### `POST /api/notifications` — Create Notification
 
 **Auth:** super_admin only
 
@@ -685,46 +523,25 @@ curl -X POST http://localhost:8080/api/notifications \
 
 ---
 
-### `PATCH /api/notifications/{id}/read`
-
-Mark notification as read.
+### `PATCH /api/notifications/{id}/read` — Mark as Read
 
 **Auth:** Own user or super_admin
-
-```bash
-curl -X PATCH http://localhost:8080/api/notifications/1/read \
-  -H "Authorization: Bearer $TOKEN"
-```
 
 **Response (200):** `{"message": "Marked as read"}`
 
 ---
 
-### `POST /api/notifications/broadcast`
-
-Send notification to multiple users.
+### `POST /api/notifications/broadcast` — Broadcast
 
 **Auth:** super_admin only
 
-```bash
-curl -X POST http://localhost:8080/api/notifications/broadcast \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"user_ids": [1, 2, 3], "title": "System Update", "message": "Maintenance tonight"}'
-```
+**Response (200):** `{"message": "Broadcast sent to 3 users"}`
 
 ---
 
-### `GET /api/notifications/dlq/stats`
-
-Retrieve dead letter queue statistics and messages.
+### `GET /api/notifications/dlq/stats` — DLQ Statistics
 
 **Auth:** super_admin only
-
-```bash
-curl http://localhost:8080/api/notifications/dlq/stats \
-  -H "Authorization: Bearer $TOKEN"
-```
 
 **Response (200):**
 ```json
@@ -732,44 +549,35 @@ curl http://localhost:8080/api/notifications/dlq/stats \
   "dlq_queue": "notification_dlx",
   "message_count": 2,
   "consumer_count": 0,
-  "messages": [
-    {
-      "routing_key": "user.registered",
-      "headers": {
-        "x-death": [
-          {
-            "count": 3,
-            "reason": "rejected",
-            "queue": "notification_queue",
-            "time": "2026-05-12T10:15:00Z"
-          }
-        ]
-      },
-      "body": {"event": "user_registered", "user_id": 42}
-    }
-  ]
+  "messages": [...]
 }
 ```
 
 ---
 
-## Redis Caching
+## Health & Metrics
 
-Event listing responses (`GET /api/events`) are cached in Redis to reduce database load under high traffic.
+### Health Endpoints
 
-**Behavior:**
-- **TTL:** 30 seconds (configurable via `CACHE_TTL` env var)
-- **Cache key format:** `events:list:{status}:{event_type}:{page}:{page_size}`
-- **Cache population:** On first request for a given filter combination, the DB result is stored in Redis
-- **Cache invalidation:** Cache is cleared on any event create, update, or delete operation
-- **Fallback:** If Redis is unavailable, the endpoint queries the database directly (graceful degradation)
+```mermaid
+flowchart TB
+    G["GET /health (gateway)"]
+    U["GET /api/users/health"]
+    E["GET /api/events/health"]
+    R["GET /api/registrations/health"]
+    N["GET /api/notifications/health"]
 
----
+    G -->|"inline"| GR["{\"status\":\"gateway-healthy\"}"]
+    U --> US["user-service"]
+    E --> ES["event-service"]
+    R --> RS["registration-service (circuit_breaker state)"]
+    N --> NS["notification-service"]
 
-## Health Endpoints
+    style G fill:#1a1a2e,stroke:#00d9ff,color:#00d9ff
+    style U & E & R & N fill:#16213e,stroke:#e94560,color:#e94560
+```
 
-### Via nginx gateway
-
+**Via nginx gateway:**
 ```bash
 curl http://localhost:8080/health                      # gateway
 curl http://localhost:8080/api/users/health             # user-service
@@ -778,12 +586,7 @@ curl http://localhost:8080/api/registrations/health     # registration-service
 curl http://localhost:8080/api/notifications/health     # notification-service
 ```
 
-Gateway returns: `{"status":"gateway-healthy"}`
-Services return: `{"status":"healthy","service":"<name>"}`
-Registration service health includes circuit breaker state: `{"status":"healthy","service":"registration-service","circuit_breaker":{"state":"closed","failure_count":0,"last_failure":null}}`
-
-### Direct service access (dev only)
-
+**Direct service access (dev only):**
 ```bash
 curl http://localhost:8001/health  # user-service
 curl http://localhost:8002/health  # event-service
@@ -791,11 +594,7 @@ curl http://localhost:8003/health  # registration-service
 curl http://localhost:8004/health  # notification-service
 ```
 
----
-
-## Metrics Endpoints
-
-All services expose Prometheus metrics:
+### Metrics Endpoints
 
 ```bash
 curl http://localhost:8001/metrics  # user-service
@@ -805,3 +604,16 @@ curl http://localhost:8004/metrics  # notification-service
 ```
 
 Metrics include: `http_requests_total`, `http_request_duration_seconds`, `http_request_size_bytes`, `http_response_size_bytes`, Python runtime metrics.
+
+---
+
+## Payment Processing
+
+| Method | Success Rate | Reference Format | Gateway |
+|--------|-------------|-----------------|---------|
+| `free` | 100% | `FREE-XXXXXXXX` | `simulated-free` |
+| `card` / `credit_card` | 95% | `TXN-XXXXXXXXXXXXXXXX` | `simulated-card` |
+| `paypal` | 95% | `TXN-XXXXXXXXXXXXXXXX` | `simulated-paypal` |
+| `bank_transfer` | 95% | `TXN-XXXXXXXXXXXXXXXX` | `simulated-bank_transfer` |
+
+Declined payments return reference format `DECLINED-XXXXXXXX`.
